@@ -303,6 +303,7 @@ class MercadoLibreService {
     }
 
     async createTestUser() {
+        console.log("Creating MercadoLibre test user...");
         try {
             const testUser = await this.meliAPI.createFullTestUser();
             return testUser;

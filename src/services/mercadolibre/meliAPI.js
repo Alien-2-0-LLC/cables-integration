@@ -486,6 +486,7 @@ class MeliAPI {
 
     //For testing purposes
     async createFullTestUser() {
+        console.log(this.clientId, this.clientSecret);
         try {
             // If you don't have an access token, request one within the method:
             if (!this.accessToken) {

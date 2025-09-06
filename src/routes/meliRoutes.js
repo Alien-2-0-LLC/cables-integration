@@ -242,6 +242,7 @@ module.exports = (meliService) => {
     });
 
     router.post("/test-user", async (req, res) => {
+        console.log("Creating test user...");
         try {
             const testUser = await meliService.createTestUser();
             res.json(testUser);
@@ -333,6 +334,7 @@ module.exports = (meliService) => {
     });
 
     router.get("/check-inventory", async (req, res, next) => {
+        console.log('🔍 Checking inventory levels...');
         try {
             const inventory = await meliService.checkInventory();
             res.json(inventory);
