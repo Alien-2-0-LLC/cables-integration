@@ -110,5 +110,22 @@ module.exports = (odooSer, meliService) => {
         }
     });
 
+    router.get("/check-inventories", async (req, res, next) => {
+        try {
+            const warehouses = await odooSer.getWarehouses();
+            res.json({
+                success: true,
+                count: warehouses.length,
+                warehouses,
+            });
+        } catch (err) {
+            console.error("❌ Failed to fetch warehouses:", err);
+            res.status(500).json({
+                success: false,
+                error: err.message,
+            });
+        }
+    });
+
     return router;
 };

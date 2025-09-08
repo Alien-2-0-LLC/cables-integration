@@ -410,7 +410,7 @@ class MercadoLibreService {
 
         console.log("📦 Inventario MercadoLibre:");
 
-        await this.odooService.authenticate(); // ✅ Solo necesitás esto una vez
+        await this.odooService.authenticate(); 
 
         for (const item of inventory) {
             console.log(

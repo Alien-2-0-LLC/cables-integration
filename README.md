@@ -65,7 +65,7 @@ cables-integration/
 ## URL For get the auth
 
 ```
-https://auth.mercadolibre.com.ar/authorization?response_type=code&client_id=2280470099740879&redirect_uri=https://demo.liensdev.com/api/meli/auth/user
+https://auth.mercadolibre.com.mx/authorization?response_type=code&client_id=3692132120828149&redirect_uri=https://demo.liensdev.com/api/meli/auth/user
 ```
 
 ## Curl to test the webhook

@@ -614,7 +614,83 @@ class OdooService {
         }
     }
 
-    async updateStockBySKU(sku, newQuantity) {
+async updateStockBySKU(sku, newQuantity) {
+  try {
+    // 1. Find product by SKU
+    const productIds = await this._execute_kw(
+      "product.product",
+      "search",
+      [[["default_code", "=", sku]]]
+    );
+    if (!productIds.length) {
+      console.warn(`❌ Producto con SKU ${sku} no encontrado en Odoo.`);
+      return null;
+    }
+
+    const productId = productIds[0];
+
+    // 2. Find warehouse "ML"
+    const warehouses = await this._execute_kw(
+      "stock.warehouse",
+      "search_read",
+      [
+        [["code", "=", "ML"]],
+        ["id", "name", "code", "lot_stock_id"],
+      ]
+    );
+    if (!warehouses.length) {
+      console.warn(`❌ Almacén 'ML' no encontrado.`);
+      return false;
+    }
+    const locationId = warehouses[0].lot_stock_id[0];
+
+    // 3. Check existing quant
+    const quants = await this._execute_kw(
+      "stock.quant",
+      "search_read",
+      [
+        [
+          ["product_id", "=", productId],
+          ["location_id", "=", locationId],
+        ],
+        ["id", "quantity"],
+      ]
+    );
+
+    if (quants.length) {
+      const currentQuantity = quants[0].quantity;
+      if (currentQuantity === newQuantity) {
+        console.log(`✅ Stock correcto en Odoo para SKU ${sku}: ${currentQuantity}`);
+        return true;
+      }
+
+      // Update existing quant
+      await this._execute_kw("stock.quant", "write", [
+        [quants[0].id],
+        { quantity: newQuantity },
+      ]);
+    } else {
+      // Create new quant
+      await this._execute_kw("stock.quant", "create", [
+        {
+          product_id: productId,
+          location_id: locationId,
+          quantity: newQuantity,
+        },
+      ]);
+    }
+
+    console.log(`✏️ Stock ajustado en Odoo para SKU ${sku} a ${newQuantity} en almacén ${warehouses[0].name}`);
+    return true;
+  } catch (err) {
+    console.error(`❌ Error actualizando stock en Odoo para SKU ${sku}:`, err.message);
+    return false;
+  }
+}
+
+
+
+    /* async updateStockBySKU(sku, newQuantity) {
         try {
             const productIds = await this._execute_kw(
                 "product.product",
@@ -629,24 +705,22 @@ class OdooService {
                 return null;
             }
 
-            const locations = await this._execute_kw(
-                "stock.location",
+            const warehouses = await this._execute_kw(
+                "stock.warehouse",
                 "search_read",
                 [
-                    [
-                        ["name", "=", "ML"],
-                        ["usage", "=", "internal"],
-                    ],
-                    ["id", "name"],
+                    [["code", "=", "ML"]],
+                    ["id", "name", "code", "lot_stock_id"],
                 ]
             );
 
-            if (!locations.length) {
+            if (!warehouses.length) {
                 console.warn(`❌ Almacén 'ML' no encontrado.`);
                 return false;
             }
 
-            const locationId = locations[0].id;
+            // 2. Get its stock location (lot_stock_id)
+            const locationId = warehouses[0].lot_stock_id[0];
 
             const productId = productIds[0];
 
@@ -717,7 +791,7 @@ class OdooService {
             );
             return false;
         }
-    }
+    } */
 
     async _execute_kw(model, method, params) {
         return new Promise((resolve, reject) => {
@@ -731,6 +805,34 @@ class OdooService {
             );
         });
     }
+
+async getWarehouses() {
+    if (!this.uid) {
+        await this.authenticate();
+    }
+
+    return new Promise((resolve, reject) => {
+        this.modelsClient.methodCall(
+            "execute_kw",
+            [
+                this.db,
+                this.uid,
+                this.password,
+                "stock.warehouse",  // model
+                "search_read",      // method
+                [
+                    [], // domain
+                    ["id", "name", "code", "company_id"], // fields
+                ],
+            ],
+            (err, value) => {
+                if (err) return reject(err);
+                resolve(value);
+            }
+        );
+    });
+}
+
 }
 
 module.exports = OdooService;
