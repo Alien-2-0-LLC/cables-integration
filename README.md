@@ -83,4 +83,5 @@ curl -X POST   http://localhost:3000/api/meli/notifications   -H 'Content-Type: 
     "actions": []
   }'
 
-```
+```2280470099740879
+https://auth.mercadolibre.com.mx/authorization?response_type=code&client_id=2280470099740879&redirect_uri=https://demo.liensdev.com/api/meli/auth/user

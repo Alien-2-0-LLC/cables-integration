@@ -66,7 +66,7 @@ class OdooService {
         try {
             if (testMode) {
                 console.log(
-                    "⚠️ Running in test mode - returning mock inventory data"
+                    "âš ï¸ Running in test mode - returning mock inventory data"
                 );
                 return [
                     { meliId: "TEST001", availableQuantity: 10 },
@@ -75,7 +75,7 @@ class OdooService {
                 ];
             }
 
-            console.log("🔍 Attempting to fetch inventory from Odoo...");
+            console.log("ðŸ” Attempting to fetch inventory from Odoo...");
 
             // Try the most common model names
             const modelsToTry = ["product.product", "product.template"];
@@ -105,11 +105,11 @@ class OdooService {
                         }));
 
                     console.log(
-                        `✅ Successfully fetched ${inventory.length} items using model: ${model}`
+                        `âœ… Successfully fetched ${inventory.length} items using model: ${model}`
                     );
                     return inventory;
                 } catch (err) {
-                    console.log(`⚠️ Model ${model} failed, trying next...`);
+                    console.log(`âš ï¸ Model ${model} failed, trying next...`);
                     continue;
                 }
             }
@@ -118,7 +118,7 @@ class OdooService {
                 `No valid product model found. Tried: ${modelsToTry.join(", ")}`
             );
         } catch (err) {
-            console.error("❌ Critical error fetching inventory:", err);
+            console.error("âŒ Critical error fetching inventory:", err);
             throw new Error(`Inventory fetch failed: ${err.message}`);
         }
     }
@@ -183,7 +183,7 @@ class OdooService {
         const billingAddress = order.buyer?.address || {};
         const shippingAddress = order.shipping_info?.address || {};
 
-        console.log(`🔍 shippingAddress `, shippingAddress);
+        console.log(`ðŸ” shippingAddress `, shippingAddress);
 
         // Use identification from either:
         // 1. Billing info (new structure)
@@ -214,8 +214,8 @@ class OdooService {
         let stateName = billingAddress.state || shippingAddress.state || "";
         let stateId = null; // Initialize stateId
 
-        // Validación básica de RFC
-        const rfcRegex = /^([A-ZÑ&]{3,4})(\d{2})(\d{2})(\d{2})([A-Z\d]{3})$/;
+        // ValidaciÃ³n bÃ¡sica de RFC
+        const rfcRegex = /^([A-ZÃ‘&]{3,4})(\d{2})(\d{2})(\d{2})([A-Z\d]{3})$/;
         let rfcFormatted = rfcRaw;
 
         if (rfcFormatted === "XAXX010101000") {
@@ -223,7 +223,7 @@ class OdooService {
         } else if (rfcFormatted && rfcFormatted !== "NOAVAILABLE") {
             if (!rfcRegex.test(rfcFormatted)) {
                 console.warn(
-                    `RFC "${rfcFormatted}" no tiene formato válido. Se limpiará.`
+                    `RFC "${rfcFormatted}" no tiene formato vÃ¡lido. Se limpiarÃ¡.`
                 );
                 rfcFormatted = false;
             }
@@ -253,14 +253,14 @@ class OdooService {
             ]);
         }
 
-        // Luego por teléfono
+        // Luego por telÃ©fono
         if (!partnerIds.length && phone) {
             partnerIds = await this.call("res.partner", "search", [
                 [["phone", "=", phone]],
             ]);
         }
 
-        // Categoría MercadoLibre
+        // CategorÃ­a MercadoLibre
         let categoryIds = await this.call("res.partner.category", "search", [
             [["name", "=", "MercadoLibre"]],
         ]);
@@ -273,17 +273,17 @@ class OdooService {
             categoryIds = [categoryId];
         }
 
-        // BUSCAMOS EL PAÍS MÉXICO DINÁMICAMENTE
+        // BUSCAMOS EL PAÃS MÃ‰XICO DINÃMICAMENTE
         const mexico = await this.call("res.country", "search_read", [
             [["name", "ilike", "Mexico"]],
             ["id", "name"],
         ]);
         if (!mexico.length) {
-            throw new Error("No se encontró el país México en res.country");
+            throw new Error("No se encontrÃ³ el paÃ­s MÃ©xico en res.country");
         }
         const mexicoCountryId = mexico[0].id;
 
-        // Extraer dirección para buscar estado
+        // Extraer direcciÃ³n para buscar estado
         const rawAddress =
             order.billing_info?.address || order.shipping_info?.address || "";
 
@@ -323,7 +323,7 @@ class OdooService {
             city,
             state_id: stateId || undefined,
             country_id: mexicoCountryId,
-            lang: "es_MX", // Idioma español por defecto
+            lang: "es_MX", // Idioma espaÃ±ol por defecto
             category_id: [[6, false, categoryIds]],
             comment: `Comprador MercadoLibre\nID: ${order.buyer?.id || ""}\nTipo ID: ${order.buyer?.identification?.type || ""}`,
         };
@@ -347,7 +347,7 @@ class OdooService {
 
             if (needsUpdate) {
                 console.log(
-                    `🔄 Actualizando partner ID ${partnerIds[0]} para orden ${order.id}`
+                    `ðŸ”„ Actualizando partner ID ${partnerIds[0]} para orden ${order.id}`
                 );
                 await this.call("res.partner", "write", [
                     [partnerIds[0]],
@@ -360,7 +360,7 @@ class OdooService {
                 partnerData,
             ]);
             console.log(
-                `✅ Creado nuevo partner ID ${newPartnerId} para orden ${order.id}`
+                `âœ… Creado nuevo partner ID ${newPartnerId} para orden ${order.id}`
             );
             return newPartnerId;
         }
@@ -369,14 +369,14 @@ class OdooService {
     async createSalesOrder(order, partnerId) {
         const isFulfillment = order.shipping_info?.is_fulfillment === true;
         console.log(
-            `📦 Original Fulfillment: ${JSON.stringify(order.shipping_info, null, 2)}`
+            ` Original Fulfillment: ${JSON.stringify(order.shipping_info, null, 2)}`
         );
 
         console.log(
-            `🚚 Fulfillment status: ${order.shipping_info?.is_fulfillment}`
+            ` Fulfillment status: ${order.shipping_info?.is_fulfillment}`
         );
 
-        // Buscar el almacén correcto según fulfillment
+        // Buscar el almacÃ©n correcto segÃºn fulfillment
         const warehouseDomain = [["code", "=", isFulfillment ? "ML" : "WH"]];
         const warehouses = await this.call("stock.warehouse", "search_read", [
             warehouseDomain,
@@ -385,15 +385,21 @@ class OdooService {
 
         if (!warehouses.length) {
             throw new Error(
-                `No se encontró el almacén ${isFulfillment ? "ML" : "WH"}`
+                `No se encontrÃ³ el almacÃ©n ${isFulfillment ? "ML" : "WH"}`
             );
         }
 
         const warehouseId = warehouses[0].id;
         const locationId = warehouses[0].lot_stock_id[0]; // stock de origen
 
+        // Construir información de IDs (Pack ID y Order IDs)
+        let orderInfo = `MercadoLibre Order ID: ${order.id}`;
+        if (order.pack_id) {
+            orderInfo += `\nPack ID: ${order.pack_id}`;
+        }
+        
         const note =
-            `MercadoLibre Order ID: ${order.id}\n` +
+            orderInfo + `\n` +
             `Buyer: ${order.buyer?.nickname || ""}\n` +
             `Shipping: ${order.shipping?.address || ""}\n` +
             `Receiver: ${order.shipping?.receiver_name || ""}`;
@@ -460,10 +466,10 @@ class OdooService {
             ["id", "name", "type_tax_use"],
         ]);
 
-        console.log("📦 Available taxes:", allTaxes);
+        console.log(" Available taxes:", allTaxes);
 
         if (!taxIds.length) {
-            console.warn("⚠️ No se encontró el impuesto del 16%");
+            console.warn("No se encontrÃ³ el impuesto del 16%");
             return;
         }
 
@@ -534,12 +540,12 @@ class OdooService {
                                     [pickingId]
                                 );
                                 console.log(
-                                    `✅ Validated picking ${pickingId}`
+                                    `Validated picking ${pickingId}`
                                 );
                             }
                         } catch (err) {
                             console.error(
-                                `❌ Error validating picking ${pickingId}:`,
+                                ` Error validating picking ${pickingId}:`,
                                 err
                             );
                         }
@@ -623,7 +629,7 @@ async updateStockBySKU(sku, newQuantity) {
       [[["default_code", "=", sku]]]
     );
     if (!productIds.length) {
-      console.warn(`❌ Producto con SKU ${sku} no encontrado en Odoo.`);
+      console.warn(`âProducto con SKU ${sku} no encontrado en Odoo.`);
       return null;
     }
 
@@ -639,7 +645,7 @@ async updateStockBySKU(sku, newQuantity) {
       ]
     );
     if (!warehouses.length) {
-      console.warn(`❌ Almacén 'ML' no encontrado.`);
+      console.warn(`Almacen 'ML' no encontrado.`);
       return false;
     }
     const locationId = warehouses[0].lot_stock_id[0];
@@ -660,7 +666,7 @@ async updateStockBySKU(sku, newQuantity) {
     if (quants.length) {
       const currentQuantity = quants[0].quantity;
       if (currentQuantity === newQuantity) {
-        console.log(`✅ Stock correcto en Odoo para SKU ${sku}: ${currentQuantity}`);
+        console.log(`Stock correcto en Odoo para SKU ${sku}: ${currentQuantity}`);
         return true;
       }
 
@@ -680,10 +686,10 @@ async updateStockBySKU(sku, newQuantity) {
       ]);
     }
 
-    console.log(`✏️ Stock ajustado en Odoo para SKU ${sku} a ${newQuantity} en almacén ${warehouses[0].name}`);
+    console.log(`Stock ajustado en Odoo para SKU ${sku} a ${newQuantity} en almacen ${warehouses[0].name}`);
     return true;
   } catch (err) {
-    console.error(`❌ Error actualizando stock en Odoo para SKU ${sku}:`, err.message);
+    console.error(`âŒ Error actualizando stock en Odoo para SKU ${sku}:`, err.message);
     return false;
   }
 }
@@ -700,7 +706,7 @@ async updateStockBySKU(sku, newQuantity) {
 
             if (!productIds.length) {
                 console.warn(
-                    `❌ Producto con SKU ${sku} no encontrado en Odoo.`
+                    `âŒ Producto con SKU ${sku} no encontrado en Odoo.`
                 );
                 return null;
             }
@@ -715,7 +721,7 @@ async updateStockBySKU(sku, newQuantity) {
             );
 
             if (!warehouses.length) {
-                console.warn(`❌ Almacén 'ML' no encontrado.`);
+                console.warn(`âŒ AlmacÃ©n 'ML' no encontrado.`);
                 return false;
             }
 
@@ -746,7 +752,7 @@ async updateStockBySKU(sku, newQuantity) {
 
             if (!productTmplId) {
                 console.warn(
-                    `❌ No se pudo obtener el product_tmpl_id para SKU ${sku}.`
+                    `No se pudo obtener el product_tmpl_id para SKU ${sku}.`
                 );
                 return false;
             }
@@ -754,7 +760,7 @@ async updateStockBySKU(sku, newQuantity) {
             // Comparar antes de actualizar
             if (currentQuantity === newQuantity) {
                 console.log(
-                    `✅ Stock correcto en Odoo para SKU ${sku}: ${currentQuantity}`
+                    ` Stock correcto en Odoo para SKU ${sku}: ${currentQuantity}`
                 );
                 return true;
             }
@@ -781,12 +787,12 @@ async updateStockBySKU(sku, newQuantity) {
             );
 
             console.log(
-                `✏️ Stock ajustado en Odoo para SKU ${sku}: de ${currentQuantity} a ${newQuantity}`
+                `Stock ajustado en Odoo para SKU ${sku}: de ${currentQuantity} a ${newQuantity}`
             );
             return true;
         } catch (err) {
             console.error(
-                `❌ Error actualizando stock en Odoo para SKU ${sku}:`,
+                `Error actualizando stock en Odoo para SKU ${sku}:`,
                 err.message
             );
             return false;
