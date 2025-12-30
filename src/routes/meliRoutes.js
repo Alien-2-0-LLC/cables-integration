@@ -64,7 +64,7 @@ module.exports = (meliService) => {
                 return res.status(200).send("OK - Order processed");
             }
 
-            // 🟦 SHIPMENTS (NEW CONDITION)
+            // 🟦 SHIPMENTS (Customer delivery)
             if (
                 body.topic === "shipments" &&
                 body.resource.includes("/shipments/")
@@ -135,7 +135,7 @@ module.exports = (meliService) => {
 
                     if (isDelivered) {
                         console.log(
-                            `📦 Shipment ${order.shipping_id} marked as delivered`
+                            `📦 Shipment ${order.shipping_id} marked as delivered to customer`
                         );
 
                         // 5. Update Odoo
@@ -174,6 +174,51 @@ module.exports = (meliService) => {
                         err
                     );
                     throw err;
+                }
+            }
+
+            // 🟪 FULFILLMENT INBOUND STOCK (ML receives your products at warehouse)
+            if (body.topic === "fbm_stock_operations") {
+                console.log(
+                    `📥 Processing FBM stock operation notification`
+                );
+
+                try {
+                    // Extract operation ID from resource
+                    // Example resource: "/fulfillment/stock/operations/123456"
+                    const operationId = body.resource.split("/").pop();
+
+                    console.log(`🔍 Fetching operation details for ID: ${operationId}`);
+
+                    // Fetch the operation details from MercadoLibre API
+                    const operation = await meliService.meliAPI.getFulfillmentOperation(operationId);
+
+                    console.log(`📋 Operation type: ${operation.type}, Inventory ID: ${operation.inventory_id}`);
+
+                    // Check if this is an INBOUND_RECEPTION operation
+                    if (operation.type === "INBOUND_RECEPTION") {
+                        console.log(`✅ Inbound reception detected for inventory ${operation.inventory_id}`);
+                        console.log(`📦 Available quantity added: ${operation.result?.available_quantity || 0}`);
+
+                        // Move stock from "ML/En Camino" to "ML/Existencias (full)" in Odoo
+                        await odooSer.moveStockOnInboundReception(
+                            operation.inventory_id,
+                            operation.detail?.available_quantity || 0
+                        );
+
+                        console.log(`✅ Stock moved in Odoo for inventory ${operation.inventory_id}`);
+                    } else {
+                        console.log(`⏩ Ignoring operation type: ${operation.type}`);
+                    }
+
+                    return res.status(200).send("OK - FBM stock operation processed");
+                } catch (err) {
+                    console.error(
+                        `❌ Error processing FBM stock operation:`,
+                        err
+                    );
+                    // Don't throw - return 200 to avoid retry loops
+                    return res.status(200).send("OK - Error logged");
                 }
             }
 

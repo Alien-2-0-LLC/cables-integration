@@ -589,7 +589,7 @@ class OdooService {
                     ["id", "in", saleOrder[0].picking_ids],
                     ["state", "!=", "done"], // Only consider not-done pickings
                 ],
-                ["name", "state", "origin"]
+                ["name", "state", "origin", "move_ids_without_package"]
             );
 
             if (!pickings || pickings.length === 0) {
@@ -613,10 +613,310 @@ class OdooService {
                 })
             );
 
+            // 4. Move stock from "ML/En Camino" to "ML/Existencias (full)" when delivered
+            await this.moveStockOnDelivery(pickings);
+
             return updateResults;
         } catch (error) {
             console.error("Error updating shipment status:", error);
             throw error;
+        }
+    }
+
+    async moveStockOnDelivery(pickings) {
+        try {
+            console.log("📦 Moving stock from 'ML/En Camino' to 'ML/Existencias (full)'...");
+
+            // 1. Find the source and destination locations
+            const sourceLocation = await this._execute_kw(
+                "stock.location",
+                "search_read",
+                [
+                    [["complete_name", "=", "Ubicaciones/ML/En Camino"]],
+                    ["id", "complete_name"]
+                ]
+            );
+
+            const destLocation = await this._execute_kw(
+                "stock.location",
+                "search_read",
+                [
+                    [["complete_name", "=", "Ubicaciones/ML/Existencias (full)"]],
+                    ["id", "complete_name"]
+                ]
+            );
+
+            if (!sourceLocation.length) {
+                console.warn("⚠️ Source location 'Ubicaciones/ML/En Camino' not found, skipping stock move");
+                return;
+            }
+
+            if (!destLocation.length) {
+                console.warn("⚠️ Destination location 'Ubicaciones/ML/Existencias (full)' not found, skipping stock move");
+                return;
+            }
+
+            const sourceLocationId = sourceLocation[0].id;
+            const destLocationId = destLocation[0].id;
+
+            console.log(`✅ Found locations - Source: ${sourceLocation[0].complete_name} (ID: ${sourceLocationId}), Dest: ${destLocation[0].complete_name} (ID: ${destLocationId})`);
+
+            // 2. For each picking, get the products and quantities
+            for (const picking of pickings) {
+                if (!picking.move_ids_without_package || picking.move_ids_without_package.length === 0) {
+                    console.log(`⏩ No moves found for picking ${picking.name}`);
+                    continue;
+                }
+
+                // Get stock move details
+                const stockMoves = await this._execute_kw(
+                    "stock.move",
+                    "search_read",
+                    [
+                        [["id", "in", picking.move_ids_without_package]],
+                        ["product_id", "product_uom_qty", "name"]
+                    ]
+                );
+
+                console.log(`📋 Processing ${stockMoves.length} products from picking ${picking.name}`);
+
+                // 3. For each product in the picking, move stock from source to destination
+                for (const move of stockMoves) {
+                    const productId = move.product_id[0];
+                    const quantity = move.product_uom_qty;
+
+                    console.log(`  📦 Moving ${quantity} units of product ${move.product_id[1]} (ID: ${productId})`);
+
+                    try {
+                        // Check if there's stock in the source location
+                        const sourceQuants = await this._execute_kw(
+                            "stock.quant",
+                            "search_read",
+                            [
+                                [
+                                    ["product_id", "=", productId],
+                                    ["location_id", "=", sourceLocationId]
+                                ],
+                                ["id", "quantity"]
+                            ]
+                        );
+
+                        if (!sourceQuants.length) {
+                            console.warn(`  ⚠️ No stock found in source location for product ${move.product_id[1]}`);
+                            continue;
+                        }
+
+                        // Reduce stock in source location
+                        const currentSourceQty = sourceQuants[0].quantity;
+                        const newSourceQty = Math.max(0, currentSourceQty - quantity);
+
+                        await this._execute_kw(
+                            "stock.quant",
+                            "write",
+                            [
+                                [sourceQuants[0].id],
+                                { quantity: newSourceQty }
+                            ]
+                        );
+
+                        console.log(`  ✅ Reduced source stock from ${currentSourceQty} to ${newSourceQty}`);
+
+                        // Check if there's already a quant in the destination location
+                        const destQuants = await this._execute_kw(
+                            "stock.quant",
+                            "search_read",
+                            [
+                                [
+                                    ["product_id", "=", productId],
+                                    ["location_id", "=", destLocationId]
+                                ],
+                                ["id", "quantity"]
+                            ]
+                        );
+
+                        if (destQuants.length) {
+                            // Update existing quant
+                            const currentDestQty = destQuants[0].quantity;
+                            const newDestQty = currentDestQty + quantity;
+
+                            await this._execute_kw(
+                                "stock.quant",
+                                "write",
+                                [
+                                    [destQuants[0].id],
+                                    { quantity: newDestQty }
+                                ]
+                            );
+
+                            console.log(`  ✅ Increased destination stock from ${currentDestQty} to ${newDestQty}`);
+                        } else {
+                            // Create new quant in destination
+                            await this._execute_kw(
+                                "stock.quant",
+                                "create",
+                                [
+                                    {
+                                        product_id: productId,
+                                        location_id: destLocationId,
+                                        quantity: quantity
+                                    }
+                                ]
+                            );
+
+                            console.log(`  ✅ Created new stock in destination: ${quantity} units`);
+                        }
+
+                        console.log(`  ✅ Successfully moved ${quantity} units of ${move.product_id[1]}`);
+                    } catch (err) {
+                        console.error(`  ❌ Error moving stock for product ${move.product_id[1]}:`, err.message);
+                        // Continue with other products even if one fails
+                    }
+                }
+            }
+
+            console.log("✅ Stock move completed successfully");
+        } catch (error) {
+            console.error("❌ Error in moveStockOnDelivery:", error);
+            // Don't throw - we don't want to fail the entire shipment update if stock move fails
+        }
+    }
+
+    async moveStockOnInboundReception(inventoryId, quantity) {
+        try {
+            console.log(`📥 ML received products at warehouse - Moving ALL stock from 'En Camino' to 'Existencias'`);
+            console.log(`   Inventory ID: ${inventoryId}, Quantity received: ${quantity}`);
+
+            // 1. Find the source and destination locations
+            const sourceLocation = await this._execute_kw(
+                "stock.location",
+                "search_read",
+                [
+                    [["complete_name", "=", "Ubicaciones/ML/En Camino"]],
+                    ["id", "complete_name"]
+                ]
+            );
+
+            const destLocation = await this._execute_kw(
+                "stock.location",
+                "search_read",
+                [
+                    [["complete_name", "=", "Ubicaciones/ML/Existencias (full)"]],
+                    ["id", "complete_name"]
+                ]
+            );
+
+            if (!sourceLocation.length) {
+                console.warn("⚠️ Source location 'Ubicaciones/ML/En Camino' not found");
+                return;
+            }
+
+            if (!destLocation.length) {
+                console.warn("⚠️ Destination location 'Ubicaciones/ML/Existencias (full)' not found");
+                return;
+            }
+
+            const sourceLocationId = sourceLocation[0].id;
+            const destLocationId = destLocation[0].id;
+
+            console.log(`✅ Found locations - Source: ${sourceLocation[0].complete_name} (ID: ${sourceLocationId}), Dest: ${destLocation[0].complete_name} (ID: ${destLocationId})`);
+
+            // 2. Get all stock from source location and move to destination
+            const sourceQuants = await this._execute_kw(
+                "stock.quant",
+                "search_read",
+                [
+                    [
+                        ["location_id", "=", sourceLocationId],
+                        ["quantity", ">", 0]
+                    ],
+                    ["id", "product_id", "quantity"]
+                ]
+            );
+
+            if (!sourceQuants.length) {
+                console.log("⏩ No stock found in 'ML/En Camino' location to move");
+                return;
+            }
+
+            console.log(`📋 Found ${sourceQuants.length} products in 'En Camino' to move`);
+
+            // 3. Move each product from source to destination
+            for (const sourceQuant of sourceQuants) {
+                const productId = sourceQuant.product_id[0];
+                const productName = sourceQuant.product_id[1];
+                const qtyToMove = sourceQuant.quantity;
+
+                console.log(`  📦 Moving ${qtyToMove} units of ${productName} (ID: ${productId})`);
+
+                try {
+                    // Reduce stock in source location to 0
+                    await this._execute_kw(
+                        "stock.quant",
+                        "write",
+                        [
+                            [sourceQuant.id],
+                            { quantity: 0 }
+                        ]
+                    );
+
+                    console.log(`  ✅ Cleared source stock (was ${qtyToMove})`);
+
+                    // Check if there's already a quant in the destination location
+                    const destQuants = await this._execute_kw(
+                        "stock.quant",
+                        "search_read",
+                        [
+                            [
+                                ["product_id", "=", productId],
+                                ["location_id", "=", destLocationId]
+                            ],
+                            ["id", "quantity"]
+                        ]
+                    );
+
+                    if (destQuants.length) {
+                        // Update existing quant
+                        const currentDestQty = destQuants[0].quantity;
+                        const newDestQty = currentDestQty + qtyToMove;
+
+                        await this._execute_kw(
+                            "stock.quant",
+                            "write",
+                            [
+                                [destQuants[0].id],
+                                { quantity: newDestQty }
+                            ]
+                        );
+
+                        console.log(`  ✅ Increased destination stock from ${currentDestQty} to ${newDestQty}`);
+                    } else {
+                        // Create new quant in destination
+                        await this._execute_kw(
+                            "stock.quant",
+                            "create",
+                            [
+                                {
+                                    product_id: productId,
+                                    location_id: destLocationId,
+                                    quantity: qtyToMove
+                                }
+                            ]
+                        );
+
+                        console.log(`  ✅ Created new stock in destination: ${qtyToMove} units`);
+                    }
+
+                    console.log(`  ✅ Successfully moved ${qtyToMove} units of ${productName}`);
+                } catch (err) {
+                    console.error(`  ❌ Error moving stock for product ${productName}:`, err.message);
+                    // Continue with other products even if one fails
+                }
+            }
+
+            console.log("✅ Inbound stock move completed successfully");
+        } catch (error) {
+            console.error("❌ Error in moveStockOnInboundReception:", error);
+            // Don't throw - log the error but don't fail the webhook
         }
     }
 

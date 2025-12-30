@@ -649,6 +649,24 @@ class MeliAPI {
         }
     }
 
+    async getFulfillmentOperation(operationId) {
+        try {
+            const response = await axios.get(
+                `${this.baseUrl}/marketplace/stock/fulfillment/operations/${operationId}`,
+                {
+                    headers: {
+                        Authorization: `Bearer ${this.token}`,
+                    },
+                }
+            );
+
+            return response.data;
+        } catch (err) {
+            console.error("Error fetching fulfillment operation:", err.response?.data || err.message);
+            throw err;
+        }
+    }
+
 async getAvailableInventory() {
     if (!this.token) {
         throw new Error("Access token is missing");
