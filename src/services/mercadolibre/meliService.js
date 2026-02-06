@@ -23,16 +23,16 @@ class MercadoLibreService {
 
     async automaticAccessToken() {
         if (
-            !this.token ||
-            !this.expiresAt ||
-            Date.now() >= this.expiresAt - 60000
+            !this.meliAPI.token ||
+            !this.meliAPI.expiresAt ||
+            Date.now() >= this.meliAPI.expiresAt.getTime() - 60000
         ) {
             console.log("🔄 Access token is expired or missing, refreshing...");
             const automaticToken = await this.meliAPI.refreshAccessToken();
 
             return automaticToken;
         } else {
-            console.log("✅ Access token is still valid");
+            console.log("✅ Access token is still valid, expires at:", this.meliAPI.expiresAt);
         }
     }
 

@@ -3,6 +3,7 @@ const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 const qs = require("qs");
+const MeliToken = require("../../models/MeliToken");
 require("dotenv").config();
 
 class MeliAPI {
@@ -15,7 +16,88 @@ class MeliAPI {
         this.baseUrl = "https://api.mercadolibre.com";
         this.token = null; // Will hold the access token
         this.refreshToken = null; // Will hold the refresh token
+        this.expiresAt = null; // Will hold token expiration time
         this.userId = process.env.MELI_USER_ID; // Will hold the user info
+        this._isRefreshing = false; // Prevent concurrent refreshes
+        this._refreshPromise = null;
+
+        // Load tokens from DB on startup
+        this._loadTokensFromDB();
+    }
+
+    // Load persisted tokens from MongoDB
+    async _loadTokensFromDB() {
+        try {
+            const stored = await MeliToken.findOne({ userId: "default" });
+            if (stored) {
+                this.token = stored.accessToken;
+                this.refreshToken = stored.refreshToken;
+                this.expiresAt = stored.expiresAt;
+                console.log("✅ Loaded tokens from database");
+            }
+        } catch (err) {
+            console.error("⚠️ Could not load tokens from DB:", err.message);
+        }
+    }
+
+    // Persist tokens to MongoDB
+    async _saveTokensToDB() {
+        try {
+            await MeliToken.findOneAndUpdate(
+                { userId: "default" },
+                {
+                    accessToken: this.token,
+                    refreshToken: this.refreshToken,
+                    expiresAt: this.expiresAt,
+                },
+                { upsert: true, new: true }
+            );
+        } catch (err) {
+            console.error("⚠️ Could not save tokens to DB:", err.message);
+        }
+    }
+
+    // Make an authenticated request with auto-retry on 401
+    async _authenticatedRequest(config) {
+        try {
+            const response = await axios({
+                ...config,
+                headers: {
+                    ...config.headers,
+                    Authorization: `Bearer ${this.token}`,
+                },
+            });
+            return response;
+        } catch (error) {
+            if (error.response?.status === 401 && this.refreshToken) {
+                console.log("🔄 Got 401, attempting token refresh...");
+                await this._ensureValidToken();
+                // Retry with new token
+                const retryResponse = await axios({
+                    ...config,
+                    headers: {
+                        ...config.headers,
+                        Authorization: `Bearer ${this.token}`,
+                    },
+                });
+                return retryResponse;
+            }
+            throw error;
+        }
+    }
+
+    // Ensure we have a valid token, refreshing if needed (prevents concurrent refreshes)
+    async _ensureValidToken() {
+        if (this._isRefreshing) {
+            return this._refreshPromise;
+        }
+        this._isRefreshing = true;
+        this._refreshPromise = this.refreshAccessToken()
+            .finally(() => {
+                this._isRefreshing = false;
+                this._refreshPromise = null;
+            });
+        return this._refreshPromise;
     }
 
     // Exchange the authorization code for an access token
@@ -40,9 +122,11 @@ class MeliAPI {
             );
 
             this.token = res.data.access_token;
-            this.refreshToken = res.data.refresh_token; // Store the refresh token
+            this.refreshToken = res.data.refresh_token;
+            this.expiresAt = new Date(Date.now() + res.data.expires_in * 1000);
 
-            console.log("✅ Access token:", this.token);
+            console.log("✅ Access token obtained, expires at:", this.expiresAt);
+            await this._saveTokensToDB();
             return res.data;
         } catch (error) {
             console.error(
@@ -77,9 +161,12 @@ class MeliAPI {
                 }
             );
 
-            this.token = res.data.access_token; // Store the new access token
-            console.log("✅ Refreshed access token:", this.token);
+            this.token = res.data.access_token;
+            this.refreshToken = res.data.refresh_token; // ML rotates refresh tokens!
+            this.expiresAt = new Date(Date.now() + res.data.expires_in * 1000);
 
+            console.log("✅ Refreshed access token, expires at:", this.expiresAt);
+            await this._saveTokensToDB();
             return res.data;
         } catch (error) {
             console.error(
@@ -98,23 +185,18 @@ class MeliAPI {
 
         try {
             // Step 1: Get the user ID
-            const userInfo = await axios.get(`${this.baseUrl}/users/me`, {
-                headers: {
-                    Authorization: `Bearer ${this.token}`,
-                },
+            const userInfo = await this._authenticatedRequest({
+                method: "get",
+                url: `${this.baseUrl}/users/me`,
             });
 
             const userId = userInfo.data.id;
 
             // Step 2: Get product IDs
-            const itemsRes = await axios.get(
-                `${this.baseUrl}/users/${userId}/items/search`,
-                {
-                    headers: {
-                        Authorization: `Bearer ${this.token}`,
-                    },
-                }
-            );
+            const itemsRes = await this._authenticatedRequest({
+                method: "get",
+                url: `${this.baseUrl}/users/${userId}/items/search`,
+            });
 
             const itemIds = itemsRes.data.results;
 
@@ -123,14 +205,10 @@ class MeliAPI {
             // Step 3: Fetch stock details for each item
             const products = await Promise.all(
                 itemIds.map(async (itemId) => {
-                    const res = await axios.get(
-                        `${this.baseUrl}/items/${itemId}`,
-                        {
-                            headers: {
-                                Authorization: `Bearer ${this.token}`,
-                            },
-                        }
-                    );
+                    const res = await this._authenticatedRequest({
+                        method: "get",
+                        url: `${this.baseUrl}/items/${itemId}`,
+                    });
 
                     const item = res.data;
 
@@ -163,23 +241,18 @@ class MeliAPI {
 
         try {
             // Paso 1: Obtener el ID del usuario autenticado
-            const userInfo = await axios.get(`${this.baseUrl}/users/me`, {
-                headers: {
-                    Authorization: `Bearer ${this.token}`,
-                },
+            const userInfo = await this._authenticatedRequest({
+                method: "get",
+                url: `${this.baseUrl}/users/me`,
             });
 
             const userId = userInfo.data.id;
 
             // Paso 2: Buscar las órdenes del vendedor
-            const ordersRes = await axios.get(
-                `${this.baseUrl}/orders/search?seller=${userId}`,
-                {
-                    headers: {
-                        Authorization: `Bearer ${this.token}`,
-                    },
-                }
-            );
+            const ordersRes = await this._authenticatedRequest({
+                method: "get",
+                url: `${this.baseUrl}/orders/search?seller=${userId}`,
+            });
 
             // Paso 3: Transformar los datos relevantes para Odoo
             const orders = ordersRes.data.results.map((order) => ({
@@ -236,14 +309,10 @@ class MeliAPI {
             console.log(`Fetching order with ID: ${orderId}`);
 
             // Get the order
-            const orderResponse = await axios.get(
-                `${this.baseUrl}/orders/${orderId}`,
-                {
-                    headers: {
-                        Authorization: `Bearer ${this.token}`,
-                    },
-                }
-            );
+            const orderResponse = await this._authenticatedRequest({
+                method: "get",
+                url: `${this.baseUrl}/orders/${orderId}`,
+            });
             const order = orderResponse.data;
 
             console.log(
@@ -326,14 +395,10 @@ class MeliAPI {
             );
 
             // Get shipping information
-            const shippingResponse = await axios.get(
-                `${this.baseUrl}/shipments/${order.shipping.id}`,
-                {
-                    headers: {
-                        Authorization: `Bearer ${this.token}`,
-                    },
-                }
-            );
+            const shippingResponse = await this._authenticatedRequest({
+                method: "get",
+                url: `${this.baseUrl}/shipments/${order.shipping.id}`,
+            });
             const shipping = shippingResponse.data;
 
             console.log(
@@ -467,14 +532,10 @@ class MeliAPI {
 
     async getBillingInfo(orderId) {
         try {
-            const response = await axios.get(
-                `${this.baseUrl}/orders/${orderId}/billing_info`,
-                {
-                    headers: {
-                        Authorization: `Bearer ${this.token}`,
-                    },
-                }
-            );
+            const response = await this._authenticatedRequest({
+                method: "get",
+                url: `${this.baseUrl}/orders/${orderId}/billing_info`,
+            });
 
             return response.data;
         } catch (err) {
@@ -568,14 +629,10 @@ class MeliAPI {
             // Build query string if specific fields are requested
             const query = fields ? `?attributes=${fields.join(",")}` : "";
 
-            const response = await axios.get(
-                `${this.baseUrl}/orders/${orderId}${query}`,
-                {
-                    headers: {
-                        Authorization: `Bearer ${this.token}`,
-                    },
-                }
-            );
+            const response = await this._authenticatedRequest({
+                method: "get",
+                url: `${this.baseUrl}/orders/${orderId}${query}`,
+            });
 
             return response.data;
         } catch (error) {
@@ -594,10 +651,9 @@ class MeliAPI {
             }
 
             // Get user ID first
-            const userInfo = await axios.get(`${this.baseUrl}/users/me`, {
-                headers: {
-                    Authorization: `Bearer ${this.token}`,
-                },
+            const userInfo = await this._authenticatedRequest({
+                method: "get",
+                url: `${this.baseUrl}/users/me`,
             });
             const userId = userInfo.data.id;
 
@@ -612,14 +668,10 @@ class MeliAPI {
             const finalParams = { ...defaultParams, ...params };
             const queryString = qs.stringify(finalParams);
 
-            const response = await axios.get(
-                `${this.baseUrl}/shipments/search?${queryString}`,
-                {
-                    headers: {
-                        Authorization: `Bearer ${this.token}`,
-                    },
-                }
-            );
+            const response = await this._authenticatedRequest({
+                method: "get",
+                url: `${this.baseUrl}/shipments/search?${queryString}`,
+            });
 
             return response.data;
         } catch (error) {
@@ -633,14 +685,10 @@ class MeliAPI {
 
     async getShipment(shipmentId) {
         try {
-            const response = await axios.get(
-                `${this.baseUrl}/shipments/${shipmentId}`,
-                {
-                    headers: {
-                        Authorization: `Bearer ${this.token}`,
-                    },
-                }
-            );
+            const response = await this._authenticatedRequest({
+                method: "get",
+                url: `${this.baseUrl}/shipments/${shipmentId}`,
+            });
 
             return response.data;
         } catch (err) {
@@ -651,14 +699,10 @@ class MeliAPI {
 
     async getFulfillmentOperation(operationId) {
         try {
-            const response = await axios.get(
-                `${this.baseUrl}/marketplace/stock/fulfillment/operations/${operationId}`,
-                {
-                    headers: {
-                        Authorization: `Bearer ${this.token}`,
-                    },
-                }
-            );
+            const response = await this._authenticatedRequest({
+                method: "get",
+                url: `${this.baseUrl}/marketplace/stock/fulfillment/operations/${operationId}`,
+            });
 
             return response.data;
         } catch (err) {
@@ -667,107 +711,94 @@ class MeliAPI {
         }
     }
 
-async getAvailableInventory() {
-    if (!this.token) {
-        throw new Error("Access token is missing");
-    }
+    async getAvailableInventory() {
+        if (!this.token) {
+            throw new Error("Access token is missing");
+        }
 
-    try {
-        // Paso 0: obtener el user_id con el token
-        const userRes = await axios.get(`${this.baseUrl}/users/me`, {
-            headers: {
-                Authorization: `Bearer ${this.token}`,
-            },
-        });
+        try {
+            // Paso 0: obtener el user_id con el token
+            const userRes = await this._authenticatedRequest({
+                method: "get",
+                url: `${this.baseUrl}/users/me`,
+            });
 
-        const userId = userRes.data.id;
+            const userId = userRes.data.id;
 
-        // Paso 1: obtener los items del vendedor
-        const itemsRes = await axios.get(
-            `${this.baseUrl}/users/${userId}/items/search`,
-            {
-                headers: {
-                    Authorization: `Bearer ${this.token}`,
-                },
-            }
-        );
+            // Paso 1: obtener los items del vendedor
+            const itemsRes = await this._authenticatedRequest({
+                method: "get",
+                url: `${this.baseUrl}/users/${userId}/items/search`,
+            });
 
-        const itemIds = itemsRes.data.results;
-        if (itemIds.length === 0) return [];
+            const itemIds = itemsRes.data.results;
+            if (itemIds.length === 0) return [];
 
-        // Paso 2: obtener los detalles de cada item
-        const inventory = await Promise.all(
-            itemIds.map(async (itemId) => {
-                try {
-                    const itemRes = await axios.get(
-                        `${this.baseUrl}/items/${itemId}`,
-                        {
-                            headers: {
-                                Authorization: `Bearer ${this.token}`,
-                            },
+            // Paso 2: obtener los detalles de cada item
+            const inventory = await Promise.all(
+                itemIds.map(async (itemId) => {
+                    try {
+                        const itemRes = await this._authenticatedRequest({
+                            method: "get",
+                            url: `${this.baseUrl}/items/${itemId}`,
+                        });
+
+                        const item = itemRes.data;
+
+                        const skuAttr = item.attributes.find(
+                            (attr) => attr.id === "SELLER_SKU"
+                        );
+                        const sku = skuAttr?.value_name || null;
+
+                        // Si es fulfillment, usar el stock del inventario
+                        if (item.user_product_id) {
+                            try {
+                                const invRes = await this._authenticatedRequest({
+                                    method: "get",
+                                    url: `${this.baseUrl}/inventory_items/${item.user_product_id}`,
+                                });
+
+                                const warehouse = invRes.data?.warehouses?.[0];
+
+                                return {
+                                    id: item.id,
+                                    title: item.title,
+                                    sku,
+                                    fulfillment: true,
+                                    available_quantity: warehouse?.available_quantity ?? 0,
+                                    reserved_quantity: warehouse?.reserved_quantity ?? 0,
+                                    warehouse_id: warehouse?.id ?? null,
+                                    status: item.status,
+                                };
+                            } catch (fulfillErr) {
+                                console.warn(`⚠️ Error en inventario fulfillment para ${item.id}:`, fulfillErr.message);
+                                // fallback a datos del item si hay error
+                            }
                         }
-                    );
 
-                    const item = itemRes.data;
-
-                    const skuAttr = item.attributes.find(
-                        (attr) => attr.id === "SELLER_SKU"
-                    );
-                    const sku = skuAttr?.value_name || null;
-
-                    // 🚚 Si es fulfillment, usar el stock del inventario
-                    if (item.user_product_id) {
-                        try {
-                            const invRes = await axios.get(
-                                `${this.baseUrl}/inventory_items/${item.user_product_id}`,
-                                {
-                                    headers: {
-                                        Authorization: `Bearer ${this.token}`,
-                                    },
-                                }
-                            );
-
-                            const warehouse = invRes.data?.warehouses?.[0];
-
-                            return {
-                                id: item.id,
-                                title: item.title,
-                                sku,
-                                fulfillment: true,
-                                available_quantity: warehouse?.available_quantity ?? 0,
-                                reserved_quantity: warehouse?.reserved_quantity ?? 0,
-                                warehouse_id: warehouse?.id ?? null,
-                                status: item.status,
-                            };
-                        } catch (fulfillErr) {
-                            console.warn(`⚠️ Error en inventario fulfillment para ${item.id}:`, fulfillErr.message);
-                            // fallback a datos del item si hay error
-                        }
+                        // Normal
+                        return {
+                            id: item.id,
+                            title: item.title,
+                            sku,
+                            fulfillment: false,
+                            available_quantity: item.available_quantity,
+                            sold_quantity: item.sold_quantity,
+                            status: item.status,
+                        };
+                    } catch (err) {
+                        console.warn(`⚠️ Error fetching item ${itemId}:`, err.message);
+                        return null;
                     }
+                })
+            );
 
-                    // 🛒 Normal
-                    return {
-                        id: item.id,
-                        title: item.title,
-                        sku,
-                        fulfillment: false,
-                        available_quantity: item.available_quantity,
-                        sold_quantity: item.sold_quantity,
-                        status: item.status,
-                    };
-                } catch (err) {
-                    console.warn(`⚠️ Error fetching item ${itemId}:`, err.message);
-                    return null;
-                }
-            })
-        );
-
-        return inventory.filter(Boolean);
-    } catch (err) {
-        console.error("❌ Error in getAvailableInventory:", err.message);
-        throw err;
+            return inventory.filter(Boolean);
+        } catch (err) {
+            console.error("❌ Error in getAvailableInventory:", err.message);
+            throw err;
+        }
     }
-}
 
 
     /*     async getAvailableInventory() {
