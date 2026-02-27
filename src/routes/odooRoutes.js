@@ -58,5 +58,74 @@ module.exports = (odooSer, meliService) => {
         }
     });
 
+    router.get("/inventory/:odoo_id", async (req, res) => {
+        try {
+            const inventoryInfo = await odooSer.getInventoryInfoForSaleOrder(
+                parseInt(req.params.odoo_id)
+            );
+
+            res.json({
+                success: true,
+                data: inventoryInfo,
+            });
+        } catch (error) {
+            console.error("Test route error:", error);
+            res.status(500).json({
+                success: false,
+                error: error.message,
+            });
+        }
+    });
+
+    router.get("/odoo-taxes", async (req, res, next) => {
+        try {
+            const taxes = await odooSer.call("account.tax", "search_read", [
+                [],
+                ["id", "name", "amount", "type_tax_use", "company_id"],
+            ]);
+
+            res.json({
+                success: true,
+                count: taxes.length,
+                taxes,
+            });
+        } catch (err) {
+            console.error("❌ Failed to fetch taxes:", err);
+            res.status(500).json({
+                success: false,
+                error: err.message,
+            });
+        }
+    });
+
+    router.get("/odoo-debug-models", async (req, res) => {
+        try {
+            const models = await odooSer.call("ir.model", "search_read", [
+                [["model", "=", "stock.warehouse"]],
+                ["model", "name"],
+            ]);
+            res.json({ models });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    router.get("/check-inventories", async (req, res, next) => {
+        try {
+            const warehouses = await odooSer.getWarehouses();
+            res.json({
+                success: true,
+                count: warehouses.length,
+                warehouses,
+            });
+        } catch (err) {
+            console.error("❌ Failed to fetch warehouses:", err);
+            res.status(500).json({
+                success: false,
+                error: err.message,
+            });
+        }
+    });
+
     return router;
 };

@@ -66,7 +66,7 @@ class OdooService {
         try {
             if (testMode) {
                 console.log(
-                    "⚠️ Running in test mode - returning mock inventory data"
+                    "âš ï¸ Running in test mode - returning mock inventory data"
                 );
                 return [
                     { meliId: "TEST001", availableQuantity: 10 },
@@ -75,7 +75,7 @@ class OdooService {
                 ];
             }
 
-            console.log("🔍 Attempting to fetch inventory from Odoo...");
+            console.log("ðŸ” Attempting to fetch inventory from Odoo...");
 
             // Try the most common model names
             const modelsToTry = ["product.product", "product.template"];
@@ -105,11 +105,11 @@ class OdooService {
                         }));
 
                     console.log(
-                        `✅ Successfully fetched ${inventory.length} items using model: ${model}`
+                        `âœ… Successfully fetched ${inventory.length} items using model: ${model}`
                     );
                     return inventory;
                 } catch (err) {
-                    console.log(`⚠️ Model ${model} failed, trying next...`);
+                    console.log(`âš ï¸ Model ${model} failed, trying next...`);
                     continue;
                 }
             }
@@ -118,7 +118,7 @@ class OdooService {
                 `No valid product model found. Tried: ${modelsToTry.join(", ")}`
             );
         } catch (err) {
-            console.error("❌ Critical error fetching inventory:", err);
+            console.error("âŒ Critical error fetching inventory:", err);
             throw new Error(`Inventory fetch failed: ${err.message}`);
         }
     }
@@ -140,11 +140,30 @@ class OdooService {
                 // 3. Add order items
                 await this.addOrderItems(order, saleOrderId);
 
+                // 4. Get the complete Odoo order data including name/reference
+                const odooOrder = await this.call("sale.order", "read", [
+                    saleOrderId,
+                    ["name", "client_order_ref", "origin"],
+                ]);
+
+                const pickingIds = await this.call("stock.picking", "search", [
+                    [["origin", "=", `MELI-${order.id}`]],
+                ]);
+
+                const pickings = pickingIds.length
+                    ? await this.call("stock.picking", "read", [
+                          pickingIds,
+                          ["id", "name", "state"],
+                      ])
+                    : [];
+
                 results.push({
                     orderId: order.id,
                     status: "completed",
-                    odooReference,
-                    saleOrderId,
+                    odooId: saleOrderId,
+                    odooReference: odooOrder.name,
+                    odooClientRef: odooOrder.client_order_ref,
+                    odooPickings: pickings, // Add picking information
                     partnerId,
                 });
             } catch (err) {
@@ -160,26 +179,51 @@ class OdooService {
     }
 
     async createOrUpdatePartner(order) {
+        // Use billing info if available, fall back to shipping info or buyer info
+        const billingAddress = order.buyer?.address || {};
+        const shippingAddress = order.shipping_info?.address || {};
+
+        console.log(`ðŸ” shippingAddress `, shippingAddress);
+
+        // Use identification from either:
+        // 1. Billing info (new structure)
+        // 2. Buyer's identification (old structure)
+        const identification = order.billing_info?.doc_number
+            ? {
+                  type: order.billing_info.doc_type || "RFC",
+                  number: order.billing_info.doc_number,
+              }
+            : order.buyer?.identification;
+
         const partnerName =
-            order.buyer?.first_name && order.buyer?.last_name
-                ? `${order.buyer.first_name} ${order.buyer.last_name}`
-                : order.buyer?.nickname || "Comprador MercadoLibre";
+            [order.buyer?.first_name, order.buyer?.last_name]
+                .filter(Boolean)
+                .join(" ") ||
+            order.buyer?.nickname ||
+            "Comprador MercadoLibre";
 
         const email = (order.buyer?.email || "").trim().toLowerCase();
         const phone = (order.buyer?.phone || "").trim();
-        const rfcRaw = (order.buyer?.identification?.number || "")
-            .trim()
-            .toUpperCase();
+        const rfcRaw = (identification?.number || "").trim().toUpperCase();
         const fallbackEmail = `${order.id}@meli.local`;
 
-        // Validación básica de RFC (puedes ajustarla según tus reglas)
-        let rfcFormatted = rfcRaw;
-        const rfcRegex = /^([A-ZÑ&]{3,4})(\d{2})(\d{2})(\d{2})([A-Z\d]{3})$/; // formato RFC mexicano común
+        // Address components - use let instead of const since they might be modified
+        let street = billingAddress.street || shippingAddress.street || "";
+        let zip = billingAddress.zip_code || shippingAddress.zip_code || "";
+        let city = billingAddress.city || shippingAddress.city || "";
+        let stateName = billingAddress.state || shippingAddress.state || "";
+        let stateId = null; // Initialize stateId
 
-        if (rfcFormatted && rfcFormatted !== "NOAVAILABLE") {
+        // ValidaciÃ³n bÃ¡sica de RFC
+        const rfcRegex = /^([A-ZÃ‘&]{3,4})(\d{2})(\d{2})(\d{2})([A-Z\d]{3})$/;
+        let rfcFormatted = rfcRaw;
+
+        if (rfcFormatted === "XAXX010101000") {
+            rfcFormatted = false;
+        } else if (rfcFormatted && rfcFormatted !== "NOAVAILABLE") {
             if (!rfcRegex.test(rfcFormatted)) {
                 console.warn(
-                    `RFC "${rfcFormatted}" no tiene formato válido. Se limpiará.`
+                    `RFC "${rfcFormatted}" no tiene formato vÃ¡lido. Se limpiarÃ¡.`
                 );
                 rfcFormatted = false;
             }
@@ -193,12 +237,15 @@ class OdooService {
         ]);
 
         // Si no existe, buscar por RFC
-        if (!partnerIds.length && rfcFormatted) {
+        if (
+            !partnerIds.length &&
+            rfcFormatted &&
+            rfcFormatted !== "XAXX010101000"
+        ) {
             partnerIds = await this.call("res.partner", "search", [
                 [["vat", "=", rfcFormatted]],
             ]);
         }
-
         // Luego por email
         if (!partnerIds.length && email) {
             partnerIds = await this.call("res.partner", "search", [
@@ -206,14 +253,14 @@ class OdooService {
             ]);
         }
 
-        // Luego por teléfono
+        // Luego por telÃ©fono
         if (!partnerIds.length && phone) {
             partnerIds = await this.call("res.partner", "search", [
                 [["phone", "=", phone]],
             ]);
         }
 
-        // Categoría MercadoLibre
+        // CategorÃ­a MercadoLibre
         let categoryIds = await this.call("res.partner.category", "search", [
             [["name", "=", "MercadoLibre"]],
         ]);
@@ -226,24 +273,19 @@ class OdooService {
             categoryIds = [categoryId];
         }
 
-        // BUSCAMOS EL PAÍS MÉXICO DINÁMICAMENTE
+        // BUSCAMOS EL PAÃS MÃ‰XICO DINÃMICAMENTE
         const mexico = await this.call("res.country", "search_read", [
             [["name", "ilike", "Mexico"]],
             ["id", "name"],
         ]);
         if (!mexico.length) {
-            throw new Error("No se encontró el país México en res.country");
+            throw new Error("No se encontrÃ³ el paÃ­s MÃ©xico en res.country");
         }
         const mexicoCountryId = mexico[0].id;
 
-        // Extraer dirección para buscar estado
+        // Extraer direcciÃ³n para buscar estado
         const rawAddress =
             order.billing_info?.address || order.shipping_info?.address || "";
-        let street = "",
-            zip = "",
-            city = "",
-            stateName = "",
-            stateId = null;
 
         if (rawAddress) {
             const parts = rawAddress.split("-");
@@ -272,13 +314,16 @@ class OdooService {
             name: partnerName,
             email: email || fallbackEmail,
             phone: phone || order.shipping_info?.receiver_phone || "",
-            vat: rfcFormatted || "",
+            vat:
+                rfcFormatted && rfcFormatted !== "XAXX010101000"
+                    ? rfcFormatted
+                    : "",
             street,
             zip,
             city,
             state_id: stateId || undefined,
             country_id: mexicoCountryId,
-            lang: "es_MX", // Idioma español por defecto
+            lang: "es_MX", // Idioma espaÃ±ol por defecto
             category_id: [[6, false, categoryIds]],
             comment: `Comprador MercadoLibre\nID: ${order.buyer?.id || ""}\nTipo ID: ${order.buyer?.identification?.type || ""}`,
         };
@@ -302,7 +347,7 @@ class OdooService {
 
             if (needsUpdate) {
                 console.log(
-                    `🔄 Actualizando partner ID ${partnerIds[0]} para orden ${order.id}`
+                    `ðŸ”„ Actualizando partner ID ${partnerIds[0]} para orden ${order.id}`
                 );
                 await this.call("res.partner", "write", [
                     [partnerIds[0]],
@@ -315,16 +360,23 @@ class OdooService {
                 partnerData,
             ]);
             console.log(
-                `✅ Creado nuevo partner ID ${newPartnerId} para orden ${order.id}`
+                `âœ… Creado nuevo partner ID ${newPartnerId} para orden ${order.id}`
             );
             return newPartnerId;
         }
     }
 
     async createSalesOrder(order, partnerId) {
-        const isFulfillment = order.is_fulfillment === true;
+        const isFulfillment = order.shipping_info?.is_fulfillment === true;
+        console.log(
+            ` Original Fulfillment: ${JSON.stringify(order.shipping_info, null, 2)}`
+        );
 
-        // Buscar el almacén correcto según fulfillment
+        console.log(
+            ` Fulfillment status: ${order.shipping_info?.is_fulfillment}`
+        );
+
+        // Buscar el almacÃ©n correcto segÃºn fulfillment
         const warehouseDomain = [["code", "=", isFulfillment ? "ML" : "WH"]];
         const warehouses = await this.call("stock.warehouse", "search_read", [
             warehouseDomain,
@@ -333,15 +385,21 @@ class OdooService {
 
         if (!warehouses.length) {
             throw new Error(
-                `No se encontró el almacén ${isFulfillment ? "ML" : "WH"}`
+                `No se encontrÃ³ el almacÃ©n ${isFulfillment ? "ML" : "WH"}`
             );
         }
 
         const warehouseId = warehouses[0].id;
         const locationId = warehouses[0].lot_stock_id[0]; // stock de origen
 
+        // Construir información de IDs (Pack ID y Order IDs)
+        let orderInfo = `MercadoLibre Order ID: ${order.id}`;
+        if (order.pack_id) {
+            orderInfo += `\nPack ID: ${order.pack_id}`;
+        }
+        
         const note =
-            `MercadoLibre Order ID: ${order.id}\n` +
+            orderInfo + `\n` +
             `Buyer: ${order.buyer?.nickname || ""}\n` +
             `Shipping: ${order.shipping?.address || ""}\n` +
             `Receiver: ${order.shipping?.receiver_name || ""}`;
@@ -372,6 +430,7 @@ class OdooService {
         return saleOrderId;
     }
 
+    /* 
     async addOrderItems(order, saleOrderId) {
         for (const item of order.order_items) {
             const productIds = await this.call("product.product", "search", [
@@ -379,13 +438,59 @@ class OdooService {
             ]);
 
             if (productIds.length) {
+                // Calculate price after 15% adjustment
+                const adjustedPrice = item.unit_price * 0.85; // 15% discount (100% - 15% = 85%)
+
                 await this.call("sale.order.line", "create", [
                     {
                         order_id: saleOrderId,
                         product_id: productIds[0],
                         name: item.title || `Product ${item.sku}`,
                         product_uom_qty: item.quantity,
-                        price_unit: item.unit_price,
+                        price_unit: adjustedPrice, // Use the adjusted price here
+                    },
+                ]);
+            }
+        }
+    }
+
+    */
+    async addOrderItems(order, saleOrderId) {
+        // Search for the 16% tax by name (in Spanish localization, often "IVA 16%" or just "16%")
+        const taxIds = await this.call("account.tax", "search", [
+            [["name", "ilike", "16%"]], // You can refine this with more filters like company_id if needed
+        ]);
+
+        const allTaxes = await this.call("account.tax", "search_read", [
+            [], // no filters
+            ["id", "name", "type_tax_use"],
+        ]);
+
+        console.log(" Available taxes:", allTaxes);
+
+        if (!taxIds.length) {
+            console.warn("No se encontrÃ³ el impuesto del 16%");
+            return;
+        }
+
+        const taxId = taxIds[0]; // Assuming the first match is correct
+
+        for (const item of order.order_items) {
+            const productIds = await this.call("product.product", "search", [
+                [["default_code", "=", item.sku]],
+            ]);
+
+            if (productIds.length) {
+                const adjustedPrice = item.unit_price / 1.16;
+
+                await this.call("sale.order.line", "create", [
+                    {
+                        order_id: saleOrderId,
+                        product_id: productIds[0],
+                        name: item.title || `Product ${item.sku}`,
+                        product_uom_qty: item.quantity,
+                        price_unit: adjustedPrice,
+                        tax_id: [[6, 0, [taxId]]], // Many2many command to set tax
                     },
                 ]);
             }
@@ -394,11 +499,11 @@ class OdooService {
 
     async updateOrderStatus(saleOrderId, meliStatus) {
         const statusMapping = {
-            paid: "sale", // When payment is confirmed
-            shipped: "progress", // When order is shipped
-            delivered: "done", // When order is delivered
-            cancelled: "cancel", // When order is cancelled
-            completed: "done", // New status for completed orders
+            paid: "sale",
+            shipped: "progress",
+            delivered: "done",
+            cancelled: "cancel",
+            completed: "done",
         };
 
         const odooStatus = statusMapping[meliStatus] || "draft";
@@ -406,26 +511,48 @@ class OdooService {
         if (odooStatus === "sale") {
             await this.call("sale.order", "action_confirm", [[saleOrderId]]);
         } else if (odooStatus === "done" || odooStatus === "completed") {
-            // For completed orders, ensure delivery is processed
             try {
-                // First confirm the order if not already confirmed
+                // 1. Confirm the order if not already confirmed
                 await this.call("sale.order", "action_confirm", [
                     [saleOrderId],
                 ]);
 
-                // Process delivery
-                const pickingIds = await this.call(
-                    "sale.order",
-                    "action_view_delivery",
-                    [[saleOrderId]]
-                );
-                if (pickingIds && pickingIds.length) {
-                    await this.call("stock.picking", "button_validate", [
-                        pickingIds,
-                    ]);
+                // 2. Get all related pickings
+                const pickingIds = await this.call("stock.picking", "search", [
+                    [["origin", "=", `MELI-${order.id}`]],
+                ]);
+
+                if (pickingIds.length) {
+                    // 3. Validate each picking
+                    for (const pickingId of pickingIds) {
+                        try {
+                            const picking = await this.call(
+                                "stock.picking",
+                                "read",
+                                [pickingId, ["state"]]
+                            );
+
+                            // Only validate if not already done
+                            if (picking.state !== "done") {
+                                await this.call(
+                                    "stock.picking",
+                                    "button_validate",
+                                    [pickingId]
+                                );
+                                console.log(
+                                    `Validated picking ${pickingId}`
+                                );
+                            }
+                        } catch (err) {
+                            console.error(
+                                ` Error validating picking ${pickingId}:`,
+                                err
+                            );
+                        }
+                    }
                 }
 
-                // Mark as done
+                // 4. Mark the order as done
                 await this.call("sale.order", "write", [
                     [saleOrderId],
                     { state: "done" },
@@ -462,7 +589,7 @@ class OdooService {
                     ["id", "in", saleOrder[0].picking_ids],
                     ["state", "!=", "done"], // Only consider not-done pickings
                 ],
-                ["name", "state", "origin"]
+                ["name", "state", "origin", "move_ids_without_package"]
             );
 
             if (!pickings || pickings.length === 0) {
@@ -471,20 +598,23 @@ class OdooService {
                 );
             }
 
-                  // Format date in Odoo's expected format
-        const now = new Date();
-        const formattedDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+            // Format date in Odoo's expected format
+            const now = new Date();
+            const formattedDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`;
 
             // 3. Update all relevant pickings
             const updateResults = await Promise.all(
                 pickings.map(async (picking) => {
                     return await odooRpc.update("stock.picking", picking.id, {
                         state: "done",
-                        /* ml_shipping_id: mlShippingId,  */// Store ML shipping ID for reference
+                        /* ml_shipping_id: mlShippingId,  */ // Store ML shipping ID for reference
                         date_done: formattedDate,
                     });
                 })
             );
+
+            // 4. Move stock from "ML/En Camino" to "ML/Existencias (full)" when delivered
+            await this.moveStockOnDelivery(pickings);
 
             return updateResults;
         } catch (error) {
@@ -492,6 +622,523 @@ class OdooService {
             throw error;
         }
     }
+
+    async moveStockOnDelivery(pickings) {
+        try {
+            console.log("📦 Moving stock from 'ML/En Camino' to 'ML/Existencias (full)'...");
+
+            // 1. Find the source and destination locations
+            const sourceLocation = await this._execute_kw(
+                "stock.location",
+                "search_read",
+                [
+                    [["complete_name", "=", "Ubicaciones/ML/En Camino"]],
+                    ["id", "complete_name"]
+                ]
+            );
+
+            const destLocation = await this._execute_kw(
+                "stock.location",
+                "search_read",
+                [
+                    [["complete_name", "=", "Ubicaciones/ML/Existencias (full)"]],
+                    ["id", "complete_name"]
+                ]
+            );
+
+            if (!sourceLocation.length) {
+                console.warn("⚠️ Source location 'Ubicaciones/ML/En Camino' not found, skipping stock move");
+                return;
+            }
+
+            if (!destLocation.length) {
+                console.warn("⚠️ Destination location 'Ubicaciones/ML/Existencias (full)' not found, skipping stock move");
+                return;
+            }
+
+            const sourceLocationId = sourceLocation[0].id;
+            const destLocationId = destLocation[0].id;
+
+            console.log(`✅ Found locations - Source: ${sourceLocation[0].complete_name} (ID: ${sourceLocationId}), Dest: ${destLocation[0].complete_name} (ID: ${destLocationId})`);
+
+            // 2. For each picking, get the products and quantities
+            for (const picking of pickings) {
+                if (!picking.move_ids_without_package || picking.move_ids_without_package.length === 0) {
+                    console.log(`⏩ No moves found for picking ${picking.name}`);
+                    continue;
+                }
+
+                // Get stock move details
+                const stockMoves = await this._execute_kw(
+                    "stock.move",
+                    "search_read",
+                    [
+                        [["id", "in", picking.move_ids_without_package]],
+                        ["product_id", "product_uom_qty", "name"]
+                    ]
+                );
+
+                console.log(`📋 Processing ${stockMoves.length} products from picking ${picking.name}`);
+
+                // 3. For each product in the picking, move stock from source to destination
+                for (const move of stockMoves) {
+                    const productId = move.product_id[0];
+                    const quantity = move.product_uom_qty;
+
+                    console.log(`  📦 Moving ${quantity} units of product ${move.product_id[1]} (ID: ${productId})`);
+
+                    try {
+                        // Check if there's stock in the source location
+                        const sourceQuants = await this._execute_kw(
+                            "stock.quant",
+                            "search_read",
+                            [
+                                [
+                                    ["product_id", "=", productId],
+                                    ["location_id", "=", sourceLocationId]
+                                ],
+                                ["id", "quantity"]
+                            ]
+                        );
+
+                        if (!sourceQuants.length) {
+                            console.warn(`  ⚠️ No stock found in source location for product ${move.product_id[1]}`);
+                            continue;
+                        }
+
+                        // Reduce stock in source location
+                        const currentSourceQty = sourceQuants[0].quantity;
+                        const newSourceQty = Math.max(0, currentSourceQty - quantity);
+
+                        await this._execute_kw(
+                            "stock.quant",
+                            "write",
+                            [
+                                [sourceQuants[0].id],
+                                { quantity: newSourceQty }
+                            ]
+                        );
+
+                        console.log(`  ✅ Reduced source stock from ${currentSourceQty} to ${newSourceQty}`);
+
+                        // Check if there's already a quant in the destination location
+                        const destQuants = await this._execute_kw(
+                            "stock.quant",
+                            "search_read",
+                            [
+                                [
+                                    ["product_id", "=", productId],
+                                    ["location_id", "=", destLocationId]
+                                ],
+                                ["id", "quantity"]
+                            ]
+                        );
+
+                        if (destQuants.length) {
+                            // Update existing quant
+                            const currentDestQty = destQuants[0].quantity;
+                            const newDestQty = currentDestQty + quantity;
+
+                            await this._execute_kw(
+                                "stock.quant",
+                                "write",
+                                [
+                                    [destQuants[0].id],
+                                    { quantity: newDestQty }
+                                ]
+                            );
+
+                            console.log(`  ✅ Increased destination stock from ${currentDestQty} to ${newDestQty}`);
+                        } else {
+                            // Create new quant in destination
+                            await this._execute_kw(
+                                "stock.quant",
+                                "create",
+                                [
+                                    {
+                                        product_id: productId,
+                                        location_id: destLocationId,
+                                        quantity: quantity
+                                    }
+                                ]
+                            );
+
+                            console.log(`  ✅ Created new stock in destination: ${quantity} units`);
+                        }
+
+                        console.log(`  ✅ Successfully moved ${quantity} units of ${move.product_id[1]}`);
+                    } catch (err) {
+                        console.error(`  ❌ Error moving stock for product ${move.product_id[1]}:`, err.message);
+                        // Continue with other products even if one fails
+                    }
+                }
+            }
+
+            console.log("✅ Stock move completed successfully");
+        } catch (error) {
+            console.error("❌ Error in moveStockOnDelivery:", error);
+            // Don't throw - we don't want to fail the entire shipment update if stock move fails
+        }
+    }
+
+    async moveStockOnInboundReception(inventoryId, quantity) {
+        try {
+            console.log(`📥 ML received products at warehouse - Moving ALL stock from 'En Camino' to 'Existencias'`);
+            console.log(`   Inventory ID: ${inventoryId}, Quantity received: ${quantity}`);
+
+            // 1. Find the source and destination locations
+            const sourceLocation = await this._execute_kw(
+                "stock.location",
+                "search_read",
+                [
+                    [["complete_name", "=", "Ubicaciones/ML/En Camino"]],
+                    ["id", "complete_name"]
+                ]
+            );
+
+            const destLocation = await this._execute_kw(
+                "stock.location",
+                "search_read",
+                [
+                    [["complete_name", "=", "Ubicaciones/ML/Existencias (full)"]],
+                    ["id", "complete_name"]
+                ]
+            );
+
+            if (!sourceLocation.length) {
+                console.warn("⚠️ Source location 'Ubicaciones/ML/En Camino' not found");
+                return;
+            }
+
+            if (!destLocation.length) {
+                console.warn("⚠️ Destination location 'Ubicaciones/ML/Existencias (full)' not found");
+                return;
+            }
+
+            const sourceLocationId = sourceLocation[0].id;
+            const destLocationId = destLocation[0].id;
+
+            console.log(`✅ Found locations - Source: ${sourceLocation[0].complete_name} (ID: ${sourceLocationId}), Dest: ${destLocation[0].complete_name} (ID: ${destLocationId})`);
+
+            // 2. Get all stock from source location and move to destination
+            const sourceQuants = await this._execute_kw(
+                "stock.quant",
+                "search_read",
+                [
+                    [
+                        ["location_id", "=", sourceLocationId],
+                        ["quantity", ">", 0]
+                    ],
+                    ["id", "product_id", "quantity"]
+                ]
+            );
+
+            if (!sourceQuants.length) {
+                console.log("⏩ No stock found in 'ML/En Camino' location to move");
+                return;
+            }
+
+            console.log(`📋 Found ${sourceQuants.length} products in 'En Camino' to move`);
+
+            // 3. Move each product from source to destination
+            for (const sourceQuant of sourceQuants) {
+                const productId = sourceQuant.product_id[0];
+                const productName = sourceQuant.product_id[1];
+                const qtyToMove = sourceQuant.quantity;
+
+                console.log(`  📦 Moving ${qtyToMove} units of ${productName} (ID: ${productId})`);
+
+                try {
+                    // Reduce stock in source location to 0
+                    await this._execute_kw(
+                        "stock.quant",
+                        "write",
+                        [
+                            [sourceQuant.id],
+                            { quantity: 0 }
+                        ]
+                    );
+
+                    console.log(`  ✅ Cleared source stock (was ${qtyToMove})`);
+
+                    // Check if there's already a quant in the destination location
+                    const destQuants = await this._execute_kw(
+                        "stock.quant",
+                        "search_read",
+                        [
+                            [
+                                ["product_id", "=", productId],
+                                ["location_id", "=", destLocationId]
+                            ],
+                            ["id", "quantity"]
+                        ]
+                    );
+
+                    if (destQuants.length) {
+                        // Update existing quant
+                        const currentDestQty = destQuants[0].quantity;
+                        const newDestQty = currentDestQty + qtyToMove;
+
+                        await this._execute_kw(
+                            "stock.quant",
+                            "write",
+                            [
+                                [destQuants[0].id],
+                                { quantity: newDestQty }
+                            ]
+                        );
+
+                        console.log(`  ✅ Increased destination stock from ${currentDestQty} to ${newDestQty}`);
+                    } else {
+                        // Create new quant in destination
+                        await this._execute_kw(
+                            "stock.quant",
+                            "create",
+                            [
+                                {
+                                    product_id: productId,
+                                    location_id: destLocationId,
+                                    quantity: qtyToMove
+                                }
+                            ]
+                        );
+
+                        console.log(`  ✅ Created new stock in destination: ${qtyToMove} units`);
+                    }
+
+                    console.log(`  ✅ Successfully moved ${qtyToMove} units of ${productName}`);
+                } catch (err) {
+                    console.error(`  ❌ Error moving stock for product ${productName}:`, err.message);
+                    // Continue with other products even if one fails
+                }
+            }
+
+            console.log("✅ Inbound stock move completed successfully");
+        } catch (error) {
+            console.error("❌ Error in moveStockOnInboundReception:", error);
+            // Don't throw - log the error but don't fail the webhook
+        }
+    }
+
+async updateStockBySKU(sku, newQuantity) {
+  try {
+    // 1. Find product by SKU
+    const productIds = await this._execute_kw(
+      "product.product",
+      "search",
+      [[["default_code", "=", sku]]]
+    );
+    if (!productIds.length) {
+      console.warn(`âProducto con SKU ${sku} no encontrado en Odoo.`);
+      return null;
+    }
+
+    const productId = productIds[0];
+
+    // 2. Find warehouse "ML"
+    const warehouses = await this._execute_kw(
+      "stock.warehouse",
+      "search_read",
+      [
+        [["code", "=", "ML"]],
+        ["id", "name", "code", "lot_stock_id"],
+      ]
+    );
+    if (!warehouses.length) {
+      console.warn(`Almacen 'ML' no encontrado.`);
+      return false;
+    }
+    const locationId = warehouses[0].lot_stock_id[0];
+
+    // 3. Check existing quant
+    const quants = await this._execute_kw(
+      "stock.quant",
+      "search_read",
+      [
+        [
+          ["product_id", "=", productId],
+          ["location_id", "=", locationId],
+        ],
+        ["id", "quantity"],
+      ]
+    );
+
+    if (quants.length) {
+      const currentQuantity = quants[0].quantity;
+      if (currentQuantity === newQuantity) {
+        console.log(`Stock correcto en Odoo para SKU ${sku}: ${currentQuantity}`);
+        return true;
+      }
+
+      // Update existing quant
+      await this._execute_kw("stock.quant", "write", [
+        [quants[0].id],
+        { quantity: newQuantity },
+      ]);
+    } else {
+      // Create new quant
+      await this._execute_kw("stock.quant", "create", [
+        {
+          product_id: productId,
+          location_id: locationId,
+          quantity: newQuantity,
+        },
+      ]);
+    }
+
+    console.log(`Stock ajustado en Odoo para SKU ${sku} a ${newQuantity} en almacen ${warehouses[0].name}`);
+    return true;
+  } catch (err) {
+    console.error(`âŒ Error actualizando stock en Odoo para SKU ${sku}:`, err.message);
+    return false;
+  }
+}
+
+
+
+    /* async updateStockBySKU(sku, newQuantity) {
+        try {
+            const productIds = await this._execute_kw(
+                "product.product",
+                "search",
+                [[["default_code", "=", sku]]]
+            );
+
+            if (!productIds.length) {
+                console.warn(
+                    `âŒ Producto con SKU ${sku} no encontrado en Odoo.`
+                );
+                return null;
+            }
+
+            const warehouses = await this._execute_kw(
+                "stock.warehouse",
+                "search_read",
+                [
+                    [["code", "=", "ML"]],
+                    ["id", "name", "code", "lot_stock_id"],
+                ]
+            );
+
+            if (!warehouses.length) {
+                console.warn(`âŒ AlmacÃ©n 'ML' no encontrado.`);
+                return false;
+            }
+
+            // 2. Get its stock location (lot_stock_id)
+            const locationId = warehouses[0].lot_stock_id[0];
+
+            const productId = productIds[0];
+
+            // Leer stock actual
+            const quantData = await this._execute_kw(
+                "stock.quant",
+                "search_read",
+                [
+                    [
+                        ["product_id", "=", productId],
+                        ["location_id", "=", locationId],
+                    ],
+                    ["quantity", "product_tmpl_id"],
+                ]
+            );
+
+            const currentQuantity = quantData.length
+                ? quantData[0].quantity
+                : 0;
+            const productTmplId = quantData.length
+                ? quantData[0].product_tmpl_id[0]
+                : null;
+
+            if (!productTmplId) {
+                console.warn(
+                    `No se pudo obtener el product_tmpl_id para SKU ${sku}.`
+                );
+                return false;
+            }
+
+            // Comparar antes de actualizar
+            if (currentQuantity === newQuantity) {
+                console.log(
+                    ` Stock correcto en Odoo para SKU ${sku}: ${currentQuantity}`
+                );
+                return true;
+            }
+
+            // Crear ajuste de stock
+            const result = await this._execute_kw(
+                "stock.change.product.qty",
+                "create",
+                [
+                    {
+                        product_id: productId,
+                        product_tmpl_id: productTmplId,
+                        new_quantity: newQuantity,
+                        location_id: locationId,
+                    },
+                ]
+            );
+
+            // Ejecutar ajuste
+            await this._execute_kw(
+                "stock.change.product.qty",
+                "change_product_qty",
+                [[result]]
+            );
+
+            console.log(
+                `Stock ajustado en Odoo para SKU ${sku}: de ${currentQuantity} a ${newQuantity}`
+            );
+            return true;
+        } catch (err) {
+            console.error(
+                `Error actualizando stock en Odoo para SKU ${sku}:`,
+                err.message
+            );
+            return false;
+        }
+    } */
+
+    async _execute_kw(model, method, params) {
+        return new Promise((resolve, reject) => {
+            this.modelsClient.methodCall(
+                "execute_kw",
+                [this.db, this.uid, this.password, model, method, params],
+                (err, value) => {
+                    if (err) reject(err);
+                    else resolve(value);
+                }
+            );
+        });
+    }
+
+async getWarehouses() {
+    if (!this.uid) {
+        await this.authenticate();
+    }
+
+    return new Promise((resolve, reject) => {
+        this.modelsClient.methodCall(
+            "execute_kw",
+            [
+                this.db,
+                this.uid,
+                this.password,
+                "stock.warehouse",  // model
+                "search_read",      // method
+                [
+                    [], // domain
+                    ["id", "name", "code", "company_id"], // fields
+                ],
+            ],
+            (err, value) => {
+                if (err) return reject(err);
+                resolve(value);
+            }
+        );
+    });
+}
+
 }
 
 module.exports = OdooService;

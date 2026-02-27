@@ -2,6 +2,9 @@
 const express = require("express");
 const router = express.Router();
 const MeliOrder = require("../models/MeliOrder"); // Assuming Mongoose model for orders
+const odooService = require("../services/odooService"); // Import Odoo service
+const odooSer = new odooService();
+const path = require("path");
 
 module.exports = (meliService) => {
     // route to get the auth
@@ -15,56 +18,10 @@ module.exports = (meliService) => {
 
         try {
             const tokens = await meliService.getAccessTokenWithUser(code); // Pass the code to the service method
-            res.json(tokens);
-        } catch (err) {
-            next(err);
-        }
-    });
-
-    // route to get the products
-    router.get("/user/products", async (req, res, next) => {
-        try {
-            const products = await meliService.getUserProducts();
-            res.json(products);
-        } catch (err) {
-            next(err);
-        }
-    });
-
-    router.get("/user/orders", async (req, res, next) => {
-        try {
-            const orders = await meliService.getUserOrders();
-            res.json(orders);
-        } catch (err) {
-            next(err);
-        }
-    });
-
-    // route to get a single order by ID
-    router.get("/user/orders/:orderId", async (req, res, next) => {
-        try {
-            const orderId = req.params.orderId;
-            if (!orderId) {
-                return res.status(400).json({ message: "Missing order ID" });
-            }
-
-            const order = await meliService.getSingleOrder(orderId);
-            res.json(order);
-        } catch (err) {
-            next(err);
-        }
-    });
-
-    // route to get a single buyer by ID
-    router.get("/user/buyer/:buyerId", async (req, res, next) => {
-        try {
-            const buyerId = req.params.buyerId;
-            if (!buyerId) {
-                return res.status(400).json({ message: "Missing buyer ID" });
-            }
-
-            const buyer = await meliService.getBuyerInfo(buyerId);
-            res.json(buyer);
+            console.log("✅ Tokens received:", tokens);
+            const newToken = await meliService.automaticAccessToken();
+            console.log("✅ Token refreshed automatically", newToken);
+            res.sendFile(path.join(__dirname, "../public/index.html"));
         } catch (err) {
             next(err);
         }
@@ -76,13 +33,13 @@ module.exports = (meliService) => {
         console.log("📦 Received ML webhook:", body.topic, body.resource);
 
         try {
+            // 🟨 ORDERS
             if (
                 body.topic === "orders_v2" &&
                 body.resource.includes("/orders/")
             ) {
                 const orderId = body.resource.split("/orders/")[1];
 
-                // Check if order exists in MongoDB
                 const existingOrder = await MeliOrder.findOne({ orderId });
                 if (existingOrder) {
                     console.log(
@@ -107,18 +64,23 @@ module.exports = (meliService) => {
                 return res.status(200).send("OK - Order processed");
             }
 
-            // 🟦 SHIPMENTS (NEW CONDITION)
+            // 🟦 SHIPMENTS (Customer delivery)
             if (
                 body.topic === "shipments" &&
                 body.resource.includes("/shipments/")
             ) {
-                const orderId = body.resource.split("/shipments/")[1];
+                const shipmentId = body.resource.split("/shipments/")[1];
 
                 console.log(
-                    `🚚 Processing shipment notification for order ID: ${orderId}`
+                    `🚚 Processing shipment notification for shipment ID: ${shipmentId}`
                 );
 
                 try {
+                    const shipmentInfo =
+                        await meliService.getSingleShipment(shipmentId);
+
+                    console.log(shipmentInfo.order_id);
+                    const orderId = shipmentInfo.order_id;
                     // 1. Get order details
                     const order =
                         await meliService.meliAPI.getSingleOrder(orderId);
@@ -173,7 +135,7 @@ module.exports = (meliService) => {
 
                     if (isDelivered) {
                         console.log(
-                            `📦 Shipment ${order.shipping_id} marked as delivered`
+                            `📦 Shipment ${order.shipping_id} marked as delivered to customer`
                         );
 
                         // 5. Update Odoo
@@ -203,6 +165,8 @@ module.exports = (meliService) => {
                         );
                     }
 
+                    const inventory = await meliService.checkInventory();
+
                     return res.status(200).send("OK - Shipment processed");
                 } catch (err) {
                     console.error(
@@ -213,14 +177,108 @@ module.exports = (meliService) => {
                 }
             }
 
+            // 🟪 FULFILLMENT INBOUND STOCK (ML receives your products at warehouse)
+            if (body.topic === "fbm_stock_operations") {
+                console.log(
+                    `📥 Processing FBM stock operation notification`
+                );
+
+                try {
+                    // Extract operation ID from resource
+                    // Example resource: "/fulfillment/stock/operations/123456"
+                    const operationId = body.resource.split("/").pop();
+
+                    console.log(`🔍 Fetching operation details for ID: ${operationId}`);
+
+                    // Fetch the operation details from MercadoLibre API
+                    const operation = await meliService.meliAPI.getFulfillmentOperation(operationId);
+
+                    console.log(`📋 Operation type: ${operation.type}, Inventory ID: ${operation.inventory_id}`);
+
+                    // Check if this is an INBOUND_RECEPTION operation
+                    if (operation.type === "INBOUND_RECEPTION") {
+                        console.log(`✅ Inbound reception detected for inventory ${operation.inventory_id}`);
+                        console.log(`📦 Available quantity added: ${operation.result?.available_quantity || 0}`);
+
+                        // Move stock from "ML/En Camino" to "ML/Existencias (full)" in Odoo
+                        await odooSer.moveStockOnInboundReception(
+                            operation.inventory_id,
+                            operation.detail?.available_quantity || 0
+                        );
+
+                        console.log(`✅ Stock moved in Odoo for inventory ${operation.inventory_id}`);
+                    } else {
+                        console.log(`⏩ Ignoring operation type: ${operation.type}`);
+                    }
+
+                    return res.status(200).send("OK - FBM stock operation processed");
+                } catch (err) {
+                    console.error(
+                        `❌ Error processing FBM stock operation:`,
+                        err
+                    );
+                    // Don't throw - return 200 to avoid retry loops
+                    return res.status(200).send("OK - Error logged");
+                }
+            }
+
             // For other webhook types we don't handle
             console.log(`ℹ️ Unhandled webhook type: ${body.topic}`);
             return res
                 .status(200)
                 .send("OK - Webhook received but not processed");
         } catch (err) {
-            console.error("Webhook processing error:", err);
-            res.status(500).send("Internal Server Error");
+            console.error("Error processing webhook:", err);
+            return res.status(500).send("Internal Server Error");
+        }
+    });
+
+    // route to get the products
+    router.get("/user/products", async (req, res, next) => {
+        try {
+            const products = await meliService.getUserProducts();
+            res.json(products);
+        } catch (err) {
+            next(err);
+        }
+    });
+
+    router.get("/user/orders", async (req, res, next) => {
+        try {
+            const orders = await meliService.getUserOrders();
+            res.json(orders);
+        } catch (err) {
+            next(err);
+        }
+    });
+
+    // route to get a single order by ID
+    router.get("/user/orders/:orderId", async (req, res, next) => {
+        try {
+            const orderId = req.params.orderId;
+            if (!orderId) {
+                return res.status(400).json({ message: "Missing order ID" });
+            }
+
+            const order = await meliService.getSingleOrder(orderId);
+            res.json(order);
+        } catch (err) {
+            next(err);
+        }
+    });
+
+    // route to get a single buyer by ID
+    router.get("/user/buyer/:buyerId", async (req, res, next) => {
+        try {
+            const buyerId = req.params.buyerId;
+            if (!buyerId) {
+                return res.status(400).json({ message: "Missing buyer ID" });
+            }
+
+            const buyer = await meliService.getBuyerInfo(buyerId);
+            res.json(buyer);
+        } catch (err) {
+            next(err);
         }
     });
 
@@ -229,6 +287,7 @@ module.exports = (meliService) => {
     });
 
     router.post("/test-user", async (req, res) => {
+        console.log("Creating test user...");
         try {
             const testUser = await meliService.createTestUser();
             res.json(testUser);
@@ -278,6 +337,21 @@ module.exports = (meliService) => {
         }
     });
 
+    // Route to get one shipment by ID
+    router.get("/user/shipment/:shipmentId", async (req, res, next) => {
+        try {
+            const shipmentId = req.params.shipmentId;
+            if (!shipmentId) {
+                return res.status(400).json({ message: "Missing shipment ID" });
+            }
+
+            const shipment = await meliService.getSingleShipment(shipmentId);
+            res.json(shipment);
+        } catch (err) {
+            next(err);
+        }
+    });
+
     router.post("/orders/:orderId/check-status", async (req, res, next) => {
         try {
             const orderId = req.params.orderId;
@@ -299,6 +373,32 @@ module.exports = (meliService) => {
                 orderId,
                 status: order.status,
             });
+        } catch (err) {
+            next(err);
+        }
+    });
+
+    router.get("/check-inventory", async (req, res, next) => {
+        console.log('🔍 Checking inventory levels...');
+        try {
+            const inventory = await meliService.checkInventory();
+            res.json(inventory);
+        } catch (err) {
+            next(err);
+        }
+    });
+
+    router.get("/auth/test", async (req, res, next) => {
+        /* const code = req.query.code; // Expecting code as a query parameter
+        if (!code) {
+            return res
+                .status(400)
+                .json({ message: "Missing authorization code" });
+        } */
+
+        try {
+            //const tokens = await meliService.getAccessTokenWithUser(code); // Pass the code to the service method
+            res.sendFile(path.join(__dirname, "../public/index.html"));
         } catch (err) {
             next(err);
         }

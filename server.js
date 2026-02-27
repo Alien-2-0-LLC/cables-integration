@@ -5,6 +5,8 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const cron = require('node-cron');
 const mongoose = require("mongoose");
+const path = require("path");
+const axios = require("axios");
 
 mongoose
     .connect(process.env.MONGODB_URI || "mongodb://localhost:27017/cables-stock", {
@@ -21,9 +23,24 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(bodyParser.json());
 
+// Serve static files
+app.use(express.static(path.join(__dirname, "public")));
+
 // *MERCADO LIBRE*
 const MercadoLibreService = require('./src/services/mercadolibre/meliService');
 const meliService = new MercadoLibreService();
+
+// Schedule a cron job to run every 5 hours to check the token expiration
+cron.schedule("0 */5 * * *", async () => {
+    console.log("🕒 Running scheduled token refresh...");
+    try {
+        await meliService.automaticAccessToken();
+        console.log("✅ Token refreshed via cron");
+    } catch (err) {
+        console.error("❌ Cron token refresh failed:", err.message);
+    }
+});
+
 
 // *ODOO*
 const odooService = require('./src/services/odooService');
@@ -53,4 +70,15 @@ app.use((err, req, res, next) => {
 
 app.listen(PORT, () => {
   console.log(`Integration hub running on port ${PORT}`);
+});
+
+cron.schedule("0 0 * * *", async () => {
+    console.log("🕒 Running scheduled inventory check...");
+
+    try {
+        const response = await axios.get(`http://localhost:${PORT}/api/meli/check-inventory`);
+        console.log("✅ Inventory check result:", response.data);
+    } catch (err) {
+        console.error("❌ Error in inventory check cron job:", err.message);
+    }
 });

@@ -1,7 +1,6 @@
 // src/services/mercadolibre/meliService.js
 const MeliAPI = require("./meliAPI");
 const odooService = require("../../services/odooService");
-/* const ErrorQueue = require('../../models/ErrorQueue'); // Assuming Mongoose */
 const MeliOrder = require("../../models/MeliOrder");
 
 class MercadoLibreService {
@@ -18,6 +17,193 @@ class MercadoLibreService {
             return tokenResponse;
         } catch (err) {
             console.error("Error getting access token:", err);
+            throw err;
+        }
+    }
+
+    async automaticAccessToken() {
+        if (
+            !this.meliAPI.token ||
+            !this.meliAPI.expiresAt ||
+            Date.now() >= this.meliAPI.expiresAt.getTime() - 60000
+        ) {
+            console.log("🔄 Access token is expired or missing, refreshing...");
+            const automaticToken = await this.meliAPI.refreshAccessToken();
+
+            return automaticToken;
+        } else {
+            console.log("✅ Access token is still valid, expires at:", this.meliAPI.expiresAt);
+        }
+    }
+
+    // Method to get one order for the user
+    async getSingleOrder(orderId) {
+        try {
+            // 1. Fetch the order from MercadoLibre API
+            const order = await this.meliAPI.getSingleOrder(orderId);
+
+            // 2. Fetch additional buyer info if available
+            let fullBuyerInfo = {};
+            if (order.buyer?.id) {
+                try {
+                    fullBuyerInfo = await this.getBuyerInfo(order.buyer.id);
+                } catch (buyerError) {
+                    console.error(
+                        `Could not fetch additional info for buyer ${order.buyer.id}:`,
+                        buyerError.message
+                    );
+                    // Fall back to basic buyer info
+                    fullBuyerInfo = {
+                        id: order.buyer.id,
+                        nickname: order.buyer.nickname,
+                    };
+                }
+            }
+
+            // 3. Fetch billing info if available
+            let billingInfo = {};
+            try {
+                billingInfo = await this.meliAPI.getBillingInfo(orderId);
+                console.log(
+                    "Raw billing info:",
+                    JSON.stringify(billingInfo, null, 2)
+                );
+
+                // Extract fields from additional_info array
+                const additionalInfo = {};
+                if (billingInfo?.billing_info?.additional_info) {
+                    billingInfo.billing_info.additional_info.forEach((item) => {
+                        additionalInfo[item.type] = item.value;
+                    });
+                }
+
+                // Add identification info to buyer object
+                fullBuyerInfo = {
+                    ...fullBuyerInfo,
+                    first_name:
+                        additionalInfo.FIRST_NAME || fullBuyerInfo.first_name,
+                    last_name:
+                        additionalInfo.LAST_NAME || fullBuyerInfo.last_name,
+                    identification: {
+                        type:
+                            billingInfo.billing_info?.doc_type ||
+                            additionalInfo.DOC_TYPE ||
+                            "RFC",
+                        number:
+                            billingInfo.billing_info?.doc_number ||
+                            additionalInfo.DOC_NUMBER ||
+                            "",
+                    },
+                    address: {
+                        street: `${additionalInfo.STREET_NAME || ""} ${additionalInfo.STREET_NUMBER || ""}`.trim(),
+                        city: additionalInfo.CITY_NAME,
+                        state: additionalInfo.STATE_NAME,
+                        zip_code: additionalInfo.ZIP_CODE,
+                        country: additionalInfo.COUNTRY_ID,
+                    },
+                };
+            } catch (billingError) {
+                console.error(
+                    `Could not fetch billing info for order ${orderId}:`,
+                    billingError.message
+                );
+            }
+
+            // 4. Prepare complete order object with merged buyer info
+            const completeOrder = {
+                ...order,
+                buyer: {
+                    ...order.buyer,
+                    ...fullBuyerInfo,
+                },
+                // Include the full billing info at the root level
+                billing_info: billingInfo.billing_info || null,
+            };
+            // 4. Check if order exists in database
+            const existing = await MeliOrder.findOne({
+                orderId: completeOrder.id,
+            });
+
+            if (existing) {
+                console.log(
+                    `🔄 Order ${completeOrder.id} already exists in database`
+                );
+                return completeOrder;
+            }
+
+            // 5. Create new order in database
+            const newOrder = await MeliOrder.create({
+                orderId: completeOrder.id,
+                status: completeOrder.status,
+                date_created: completeOrder.date_created,
+                total_amount: completeOrder.total_amount,
+                currency: completeOrder.currency,
+                buyer: {
+                    id: completeOrder.buyer.id,
+                    nickname: completeOrder.buyer.nickname,
+                    first_name: completeOrder.buyer.first_name,
+                    last_name: completeOrder.buyer.last_name,
+                    email: completeOrder.buyer.email,
+                    phone: completeOrder.buyer.phone,
+                    identification_type:
+                        completeOrder.buyer.identification?.type,
+                    identification_number:
+                        completeOrder.buyer.identification?.number,
+                },
+                shipping: {
+                    receiver_name: completeOrder.shipping_info.receiver_name,
+                    receiver_phone: completeOrder.shipping_info.receiver_phone,
+                    address: completeOrder.shipping_info.address,
+                    status: completeOrder.shipping_info.shipping_status,
+                    tags: completeOrder.shipping_info.tags, // Now properly included
+                },
+                order_items: completeOrder.order_items,
+                payments: completeOrder.payments.map((payment) => ({
+                    id: payment.id,
+                    status: payment.status,
+                    total_paid: payment.total_paid,
+                    date_approved: payment.date_approved,
+                })),
+            });
+
+            console.log(
+                `📝 Created new order in database: ${newOrder.orderId}`
+            );
+
+            // Check if order should be marked as completed based on tags
+            await this.checkAndUpdateOrderStatus(newOrder);
+
+            // 6. Send to Odoo with complete information
+            const odooResults = await this.odooService.pushOrdersToOdoo([
+                completeOrder,
+            ]);
+            const odooResult = odooResults[0];
+
+            // 7. Update MongoDB with Odoo references
+            if (odooResult.odooId) {
+                await MeliOrder.findOneAndUpdate(
+                    { orderId: completeOrder.id },
+                    {
+                        odoo_id: odooResult.odooId,
+                        odoo_reference: odooResult.odooReference,
+                        odoo_client_ref: odooResult.odooClientRef,
+                        odoo_picking_ids: odooResult.odooPickings.map((p) => ({
+                            id: p.id,
+                            name: p.name,
+                            status: p.state,
+                        })),
+                    }
+                );
+            }
+
+            return {
+                ...completeOrder,
+                odooReference: odooResult.odooReference,
+                odooId: odooResult.odooId,
+                odooPickings: odooResult.odooPickings,
+            };
+        } catch (err) {
+            console.error("Error fetching single order:", err);
             throw err;
         }
     }
@@ -85,123 +271,6 @@ class MercadoLibreService {
         }
     }
 
-    // Method to get one order for the user
-    async getSingleOrder(orderId) {
-        try {
-            // 1. Fetch the order from MercadoLibre API
-            const order = await this.meliAPI.getSingleOrder(orderId);
-
-            // 2. Fetch additional buyer info if available
-            let fullBuyerInfo = {};
-            if (order.buyer?.id) {
-                try {
-                    fullBuyerInfo = await this.getBuyerInfo(order.buyer.id);
-                } catch (buyerError) {
-                    console.error(
-                        `Could not fetch additional info for buyer ${order.buyer.id}:`,
-                        buyerError.message
-                    );
-                    // Fall back to basic buyer info
-                    fullBuyerInfo = {
-                        id: order.buyer.id,
-                        nickname: order.buyer.nickname,
-                    };
-                }
-            }
-
-            // 3. Prepare complete order object with merged buyer info
-            const completeOrder = {
-                ...order,
-                buyer: {
-                    ...order.buyer,
-                    ...fullBuyerInfo,
-                },
-                // Ensure shipping_info.tags exists even if empty
-                shipping_info: {
-                    ...order.shipping_info,
-                    tags: order.shipping_info?.tags || [], // This is the key change
-                },
-            };
-
-            // 4. Check if order exists in database
-            const existing = await MeliOrder.findOne({
-                orderId: completeOrder.id,
-            });
-
-            if (existing) {
-                console.log(
-                    `🔄 Order ${completeOrder.id} already exists in database`
-                );
-                return completeOrder;
-            }
-
-            // 5. Create new order in database
-            const newOrder = await MeliOrder.create({
-                orderId: completeOrder.id,
-                status: completeOrder.status,
-                date_created: completeOrder.date_created,
-                total_amount: completeOrder.total_amount,
-                currency: completeOrder.currency,
-                buyer: {
-                    id: completeOrder.buyer.id,
-                    nickname: completeOrder.buyer.nickname,
-                    first_name: completeOrder.buyer.first_name,
-                    last_name: completeOrder.buyer.last_name,
-                    email: completeOrder.buyer.email,
-                    phone: completeOrder.buyer.phone,
-                    identification_type:
-                        completeOrder.buyer.identification?.type,
-                    identification_number:
-                        completeOrder.buyer.identification?.number,
-                },
-                shipping: {
-                    receiver_name: completeOrder.shipping_info.receiver_name,
-                    receiver_phone: completeOrder.shipping_info.receiver_phone,
-                    address: completeOrder.shipping_info.address,
-                    status: completeOrder.shipping_info.shipping_status,
-                    tags: completeOrder.shipping_info.tags, // Now properly included
-                },
-                order_items: completeOrder.order_items,
-                payments: completeOrder.payments.map((payment) => ({
-                    id: payment.id,
-                    status: payment.status,
-                    total_paid: payment.total_paid,
-                    date_approved: payment.date_approved,
-                })),
-            });
-
-            console.log(
-                `📝 Created new order in database: ${newOrder.orderId}`
-            );
-
-            // Check if order should be marked as completed based on tags
-            await this.checkAndUpdateOrderStatus(newOrder);
-
-            // 6. Send to Odoo with complete information
-            const odooResult = await this.odooService.pushOrdersToOdoo([
-                completeOrder,
-            ]);
-
-            // 7. Update with Odoo reference
-            if (odooResult.length > 0 && odooResult[0].odooReference) {
-                await MeliOrder.findOneAndUpdate(
-                    { orderId: completeOrder.id },
-                    {
-                        odoo_reference: odooResult[0].odooReference,
-                        odoo_id: odooResult[0].saleOrderId,
-                    }
-                );
-            }
-
-            return completeOrder;
-
-            return completeOrder;
-        } catch (err) {
-            console.error("Error fetching single order:", err);
-            throw err;
-        }
-    }
-
     // Method to get info from a buyer
     async getBuyerInfo(buyerId) {
         try {
@@ -234,6 +303,7 @@ class MercadoLibreService {
     }
 
     async createTestUser() {
+        console.log("Creating MercadoLibre test user...");
         try {
             const testUser = await this.meliAPI.createFullTestUser();
             return testUser;
@@ -259,6 +329,18 @@ class MercadoLibreService {
 
             // Optionally process or transform the data here
             return shipments;
+        } catch (err) {
+            console.error("Error getting shipments:", err);
+            throw err;
+        }
+    }
+
+    async getSingleShipment(shipmentId) {
+        try {
+            const shipment = await this.meliAPI.getShipment(shipmentId);
+
+            // Optionally process or transform the data here
+            return shipment;
         } catch (err) {
             console.error("Error getting shipments:", err);
             throw err;
@@ -308,7 +390,7 @@ class MercadoLibreService {
                     "delivered"
                 );
                 console.log(
-                    `✅ Updated Odoo order ${dbOrder.odoo_reference} (ID: ${dbOrder.odoo_id}) to delivered status`
+                    `✅ Updated Odoo order ${dbOrder.odoo_reference} (ID: ${dbOrder.odoo_id}) to delivered`
                 );
             } else {
                 console.log(
@@ -321,6 +403,29 @@ class MercadoLibreService {
                 err
             );
         }
+    }
+
+    async checkInventory() {
+        const inventory = await this.meliAPI.getAvailableInventory();
+
+        console.log("📦 Inventario MercadoLibre:");
+
+        await this.odooService.authenticate(); 
+
+        for (const item of inventory) {
+            console.log(
+                `🧾 ${item.title} (ID: ${item.id}) - Stock: ${item.available_quantity}, SKU: ${item.sku}`
+            );
+
+            if (item.sku) {
+                await this.odooService.updateStockBySKU(
+                    item.sku,
+                    item.available_quantity
+                );
+            }
+        }
+
+        return inventory;
     }
 }
 
