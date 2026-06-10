@@ -170,7 +170,7 @@ module.exports = (meliService) => {
                     return res.status(200).send("OK - Shipment processed");
                 } catch (err) {
                     console.error(
-                        `❌ Error processing shipment for order ${orderId}:`,
+                        `❌ Error processing shipment for shipment ${shipmentId}:`,
                         err
                     );
                     throw err;

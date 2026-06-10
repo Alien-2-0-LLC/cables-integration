@@ -8,13 +8,26 @@ const mongoose = require("mongoose");
 const path = require("path");
 const axios = require("axios");
 
-mongoose
-    .connect(process.env.MONGODB_URI || "mongodb://localhost:27017/cables-stock", {
-        useNewUrlParser: true,
-        useUnifiedTopology: true,
-    })
-    .then(() => console.log("✅ MongoDB connected"))
-    .catch((err) => console.error("❌ MongoDB connection error:", err));
+const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/cables-stock";
+
+mongoose.connection.on('connected', () => console.log("✅ MongoDB connected"));
+mongoose.connection.on('disconnected', () => console.warn("⚠️ MongoDB disconnected"));
+mongoose.connection.on('reconnected', () => console.log("🔄 MongoDB reconnected"));
+mongoose.connection.on('error', (err) => console.error("❌ MongoDB connection error:", err));
+
+async function connectWithRetry() {
+    try {
+        await mongoose.connect(MONGODB_URI, {
+            // fail fast so the 5s retry loop drives reconnection cadence
+            serverSelectionTimeoutMS: 5000,
+        });
+    } catch (err) {
+        console.error("❌ MongoDB initial connect failed, retrying in 5s...", err.message);
+        setTimeout(connectWithRetry, 5000);
+    }
+}
+
+connectWithRetry();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
