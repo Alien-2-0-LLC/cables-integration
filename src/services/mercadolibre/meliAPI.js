@@ -502,7 +502,11 @@ class MeliAPI {
     async getBuyerInfo(buyerId) {
         try {
             // Fetch buyer info from API
-            const buyer = await this.meliAPI.getBuyerInfo(buyerId);
+            const response = await this._authenticatedRequest({
+                method: "get",
+                url: `${this.baseUrl}/users/${buyerId}`,
+            });
+            const buyer = response.data;
 
             // Transform data if needed
             return {
